@@ -9,9 +9,21 @@ const publicRoutes   = require("./routes/public.routes");
 
 const app = express();
 
+const allowedOrigins = [
+  process.env.FRONTEND_URL,        // tu URL de Netlify
+  "http://localhost:5173",          // desarrollo local
+];
+
 app.use(cors({
-  origin:"*",
+  origin: (origin, callback) => {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error("CORS no permitido: " + origin));
+    }
+  },
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
+  allowedHeaders: ["Content-Type", "Authorization"],
 }));
 
 app.use(express.json());
