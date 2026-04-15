@@ -84,7 +84,7 @@ router.post("/:barberiaId", upload.single("imagen"), async (req, res) => {
     }
     const [result] = await db.query(
       "INSERT INTO productos_barberia (id_barberia,nombre,descripcion,precio,imagen_url,stock,estado) VALUES (?,?,?,?,?,?,?)",
-      [req.params.barberiaId, nombre.trim(), descripcion?.trim()||null, parseFloat(precio), parseInt(stock)||0, estado||"disponible", imagen_url]
+      [req.params.barberiaId, nombre.trim(), descripcion?.trim()||null, parseFloat(precio), imagen_url, parseInt(stock)||0, estado||"disponible"]
     );
     res.status(201).json({ message: "Producto creado", id: result.insertId, imagen_url });
   } catch (e) { console.error(e); res.status(500).json({ error: "Error al crear producto" }); }
