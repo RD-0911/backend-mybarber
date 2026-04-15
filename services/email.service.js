@@ -5,7 +5,7 @@ const generarCodigo = () =>
 
 const enviarCorreoRecuperacion = async (correoDestino, codigo) => {
   await transporter.sendMail({
-    from: '"MyBarber 💈" <a8264a001@smtp-brevo.com>',
+    from: '"MyBarber 💈" <mybarber564@gmail.com>',
     to: correoDestino,
     subject: "Código de recuperación - MyBarber",
     html: `
