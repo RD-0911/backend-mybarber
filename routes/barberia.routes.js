@@ -1,34 +1,38 @@
-const express = require("express");
-const router  = express.Router();
-const db      = require("../config/db");
-const path    = require("path");
-const fs      = require("fs");
-const multer  = require("multer");
+const express    = require("express");
+const router     = express.Router();
+const db         = require("../config/db");
+const multer     = require("multer");
+const cloudinary = require("cloudinary").v2;
+const streamifier = require("streamifier");
 
-// ── Configuración de multer ──────────────────────────────────────
-const uploadDir = path.join(__dirname, "../uploads");
-if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
-
-const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => cb(null, uploadDir),
-  filename: (req, _file, cb) => {
-    // Nombre único: barberia_ID_timestamp.ext
-    const ext = path.extname(_file.originalname).toLowerCase() || ".jpg";
-    cb(null, `barberia_${req.params.id}_${Date.now()}${ext}`);
-  }
+// ── Cloudinary config ────────────────────────────────────────────
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key:    process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-const fileFilter = (_req, file, cb) => {
-  const allowed = ["image/jpeg", "image/png", "image/webp", "image/gif"];
-  if (allowed.includes(file.mimetype)) cb(null, true);
-  else cb(new Error("Solo se permiten imágenes (jpg, png, webp)"), false);
-};
-
+// ── Multer en memoria (no guarda en disco) ───────────────────────
 const upload = multer({
-  storage,
-  fileFilter,
-  limits: { fileSize: 3 * 1024 * 1024 } // 3MB máximo
+  storage: multer.memoryStorage(),
+  fileFilter: (_req, file, cb) => {
+    const allowed = ["image/jpeg", "image/png", "image/webp", "image/gif"];
+    if (allowed.includes(file.mimetype)) cb(null, true);
+    else cb(new Error("Solo se permiten imágenes (jpg, png, webp)"), false);
+  },
+  limits: { fileSize: 3 * 1024 * 1024 }
 });
+
+// Helper: sube buffer a Cloudinary
+function subirACloudinary(buffer, publicId) {
+  return new Promise((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream(
+      { public_id: publicId, folder: "mybarber", overwrite: true, resource_type: "image" },
+      (error, result) => { if (error) reject(error); else resolve(result); }
+    );
+    streamifier.createReadStream(buffer).pipe(stream);
+  });
+}
 
 // ─────────────────────────────────────────────────────────────────
 // GET /barberia/:id
@@ -47,23 +51,18 @@ router.get("/:id", async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────
-// POST /barberia/:id/foto  →  Subir foto de perfil
+// POST /barberia/:id/foto  →  Subir foto a Cloudinary
 // ─────────────────────────────────────────────────────────────────
 router.post("/:id/foto", upload.single("foto"), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: "No se recibió ninguna imagen" });
 
   try {
-    // Borrar foto anterior si existe
-    const [rows] = await db.query("SELECT foto_perfil FROM barberia WHERE id=?", [req.params.id]);
-    if (rows.length && rows[0].foto_perfil) {
-      const rutaAnterior = path.join(__dirname, "../", rows[0].foto_perfil.replace(/^\//, ""));
-      if (fs.existsSync(rutaAnterior)) fs.unlinkSync(rutaAnterior);
-    }
+    const publicId = `barberia_${req.params.id}`;
+    const result   = await subirACloudinary(req.file.buffer, publicId);
 
-    const rutaRelativa = `/uploads/${req.file.filename}`;
-    await db.query("UPDATE barberia SET foto_perfil=? WHERE id=?", [rutaRelativa, req.params.id]);
+    await db.query("UPDATE barberia SET foto_perfil=? WHERE id=?", [result.secure_url, req.params.id]);
 
-    res.json({ message: "Foto actualizada", foto_perfil: rutaRelativa });
+    res.json({ message: "Foto actualizada", foto_perfil: result.secure_url });
   } catch (e) {
     console.error("Error POST foto:", e);
     res.status(500).json({ error: "Error al guardar la foto" });
@@ -71,15 +70,11 @@ router.post("/:id/foto", upload.single("foto"), async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────
-// DELETE /barberia/:id/foto  →  Eliminar foto de perfil
+// DELETE /barberia/:id/foto  →  Eliminar foto de Cloudinary
 // ─────────────────────────────────────────────────────────────────
 router.delete("/:id/foto", async (req, res) => {
   try {
-    const [rows] = await db.query("SELECT foto_perfil FROM barberia WHERE id=?", [req.params.id]);
-    if (rows.length && rows[0].foto_perfil) {
-      const rutaFisica = path.join(__dirname, "../", rows[0].foto_perfil.replace(/^\//, ""));
-      if (fs.existsSync(rutaFisica)) fs.unlinkSync(rutaFisica);
-    }
+    await cloudinary.uploader.destroy(`mybarber/barberia_${req.params.id}`);
     await db.query("UPDATE barberia SET foto_perfil=NULL WHERE id=?", [req.params.id]);
     res.json({ message: "Foto eliminada" });
   } catch (e) {
@@ -140,7 +135,7 @@ router.put("/:id/servicios/:sid", async (req, res) => {
       );
     } catch (_) {
       [result] = await db.query(
-        "UPDATE servicios SET descripcion=?, precio=?, hora_estimada=? WHERE id=? AND id_barberia=?",
+        "UPDATE servicios SET descripcion=?, hora_estimada=? WHERE id=? AND id_barberia=?",
         [descripcion.trim(), parseFloat(precio), parseInt(hora_estimada), req.params.sid, req.params.id]
       );
     }
