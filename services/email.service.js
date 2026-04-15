@@ -1,12 +1,12 @@
-const transporter = require("../config/mailer");
+const resend = require("../config/mailer");
 
 const generarCodigo = () =>
   Math.floor(100000 + Math.random() * 900000).toString();
 
 const enviarCorreoRecuperacion = async (correoDestino, codigo) => {
-  const mailOptions = {
-    from:    `"MyBarber 💈" <${process.env.EMAIL_USER}>`,
-    to:      correoDestino,
+  await resend.emails.send({
+    from: "MyBarber <onboarding@resend.dev>",
+    to: correoDestino,
     subject: "Código de recuperación - MyBarber",
     html: `
       <div style="font-family: 'Segoe UI', sans-serif; max-width: 480px; margin: 0 auto; background: #fff; border-radius: 16px; overflow: hidden; box-shadow: 0 4px 24px rgba(0,0,0,0.10);">
@@ -27,9 +27,7 @@ const enviarCorreoRecuperacion = async (correoDestino, codigo) => {
         </div>
       </div>
     `,
-  };
-
-  await transporter.sendMail(mailOptions);
+  });
 };
 
 module.exports = { generarCodigo, enviarCorreoRecuperacion };
