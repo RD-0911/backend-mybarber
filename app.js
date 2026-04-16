@@ -7,6 +7,7 @@ const barberiaRoutes  = require("./routes/barberia.routes");
 const clientesRoutes  = require("./routes/clientes.routes");
 const publicRoutes    = require("./routes/public.routes");
 const productosRoutes = require("./routes/productos.routes");
+const adminRoutes     = require("./routes/admin.routes");
 
 const app = express();
 
@@ -41,5 +42,6 @@ app.use("/barberia",  barberiaRoutes);
 app.use("/clientes",  clientesRoutes);
 app.use("/public",    publicRoutes);
 app.use("/productos", productosRoutes);
+app.use("/admin",     adminRoutes);
 
 module.exports = app;
