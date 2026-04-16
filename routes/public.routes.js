@@ -135,6 +135,10 @@ router.post("/citas", verificarTokenOpcional, async (req, res) => {
   const inicioDate = new Date(fechaInicio);
   if (isNaN(inicioDate.getTime()))
     return res.status(400).json({ error: "Fecha de inicio inválida" });
+  
+  // Rechazar citas en el pasado
+if (inicioDate < new Date())
+  return res.status(400).json({ error: "No puedes agendar una cita en una hora que ya pasó." });
 
   // Validar datos del cliente solo en reservas públicas
   if (!esAdmin) {
