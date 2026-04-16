@@ -91,7 +91,18 @@ router.get("/:id/servicios", async (req, res) => {
       "SELECT id, descripcion, precio, hora_estimada, IFNULL(activo, 1) AS activo FROM servicios WHERE id_barberia = ? ORDER BY id ASC",
       [req.params.id]
     );
-    res.json(rows);
+    // Normalizar hora_estimada: puede venir como TIME string "00:30:00" o como INT
+    const servicios = rows.map(s => {
+      let mins = s.hora_estimada
+      if (typeof mins === "string" && mins.includes(":")) {
+        const [h, m, sec] = mins.split(":").map(Number)
+        mins = h * 60 + m || sec || 30  // si HH:MM es 0, usar segundos como minutos
+      } else {
+        mins = parseInt(mins) || 30
+      }
+      return { ...s, hora_estimada: mins }
+    })
+    res.json(servicios);
   } catch (e) {
     res.status(500).json({ error: "Error al obtener servicios" });
   }
@@ -100,7 +111,7 @@ router.get("/:id/servicios", async (req, res) => {
 // POST /barberia/:id/servicios
 router.post("/:id/servicios", async (req, res) => {
   const { descripcion, precio, hora_estimada } = req.body;
-  if (!descripcion || !precio || !hora_estimada)
+  if (!descripcion || precio === undefined || precio === null || hora_estimada === undefined || hora_estimada === null)
     return res.status(400).json({ error: "descripcion, precio y hora_estimada son requeridos" });
   try {
     let result;
@@ -124,7 +135,7 @@ router.post("/:id/servicios", async (req, res) => {
 // PUT /barberia/:id/servicios/:sid
 router.put("/:id/servicios/:sid", async (req, res) => {
   const { descripcion, precio, hora_estimada, activo } = req.body;
-  if (!descripcion || !precio || !hora_estimada)
+  if (!descripcion || precio === undefined || precio === null || hora_estimada === undefined || hora_estimada === null)
     return res.status(400).json({ error: "Faltan campos requeridos" });
   try {
     let result;
@@ -134,8 +145,9 @@ router.put("/:id/servicios/:sid", async (req, res) => {
         [descripcion.trim(), parseFloat(precio), parseInt(hora_estimada), activo !== undefined ? (activo ? 1 : 0) : 1, req.params.sid, req.params.id]
       );
     } catch (_) {
+      // Fallback si no existe columna activo
       [result] = await db.query(
-        "UPDATE servicios SET descripcion=?, hora_estimada=? WHERE id=? AND id_barberia=?",
+        "UPDATE servicios SET descripcion=?, precio=?, hora_estimada=? WHERE id=? AND id_barberia=?",
         [descripcion.trim(), parseFloat(precio), parseInt(hora_estimada), req.params.sid, req.params.id]
       );
     }
