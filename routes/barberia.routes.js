@@ -34,14 +34,6 @@ function subirACloudinary(buffer, publicId) {
   });
 }
 
-// Helper: convierte minutos enteros a string TIME para MySQL "HH:MM:00"
-function minsToTime(mins) {
-  const m = parseInt(mins) || 30
-  const hh = String(Math.floor(m / 60)).padStart(2, "0")
-  const mm = String(m % 60).padStart(2, "0")
-  return `${hh}:${mm}:00`
-}
-
 // ─────────────────────────────────────────────────────────────────
 // GET /barberia/:id
 // ─────────────────────────────────────────────────────────────────
@@ -99,18 +91,7 @@ router.get("/:id/servicios", async (req, res) => {
       "SELECT id, descripcion, precio, hora_estimada, IFNULL(activo, 1) AS activo FROM servicios WHERE id_barberia = ? ORDER BY id ASC",
       [req.params.id]
     );
-    // Normalizar hora_estimada: puede venir como TIME string "00:30:00" o como INT
-    const servicios = rows.map(s => {
-      let mins = s.hora_estimada
-      if (typeof mins === "string" && mins.includes(":")) {
-        const [h, m, sec] = mins.split(":").map(Number)
-        mins = (h * 60 + m) || sec || 30  // paréntesis necesarios para evaluar correctamente
-      } else {
-        mins = parseInt(mins) || 30
-      }
-      return { ...s, hora_estimada: mins }
-    })
-    res.json(servicios);
+    res.json(rows);
   } catch (e) {
     res.status(500).json({ error: "Error al obtener servicios" });
   }
@@ -126,12 +107,12 @@ router.post("/:id/servicios", async (req, res) => {
     try {
       [result] = await db.query(
         "INSERT INTO servicios (id_barberia, descripcion, precio, hora_estimada, activo) VALUES (?,?,?,?,1)",
-        [req.params.id, descripcion.trim(), parseFloat(precio), minsToTime(hora_estimada)]
+        [req.params.id, descripcion.trim(), parseFloat(precio), parseInt(hora_estimada)]
       );
     } catch (_) {
       [result] = await db.query(
         "INSERT INTO servicios (id_barberia, descripcion, precio, hora_estimada) VALUES (?,?,?,?)",
-        [req.params.id, descripcion.trim(), parseFloat(precio), minsToTime(hora_estimada)]
+        [req.params.id, descripcion.trim(), parseFloat(precio), parseInt(hora_estimada)]
       );
     }
     res.status(201).json({ message: "Servicio creado", id: result.insertId });
@@ -150,13 +131,13 @@ router.put("/:id/servicios/:sid", async (req, res) => {
     try {
       [result] = await db.query(
         "UPDATE servicios SET descripcion=?, precio=?, hora_estimada=?, activo=? WHERE id=? AND id_barberia=?",
-        [descripcion.trim(), parseFloat(precio), minsToTime(hora_estimada), activo !== undefined ? (activo ? 1 : 0) : 1, req.params.sid, req.params.id]
+        [descripcion.trim(), parseFloat(precio), parseInt(hora_estimada), activo !== undefined ? (activo ? 1 : 0) : 1, req.params.sid, req.params.id]
       );
     } catch (_) {
       // Fallback si no existe columna activo
       [result] = await db.query(
         "UPDATE servicios SET descripcion=?, precio=?, hora_estimada=? WHERE id=? AND id_barberia=?",
-        [descripcion.trim(), parseFloat(precio), minsToTime(hora_estimada), req.params.sid, req.params.id]
+        [descripcion.trim(), parseFloat(precio), parseInt(hora_estimada), req.params.sid, req.params.id]
       );
     }
     if (result.affectedRows === 0) return res.status(404).json({ error: "Servicio no encontrado" });
