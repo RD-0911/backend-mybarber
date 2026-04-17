@@ -43,5 +43,7 @@ app.use("/clientes",  clientesRoutes);
 app.use("/public",    publicRoutes);
 app.use("/productos", productosRoutes);
 app.use("/admin",     adminRoutes);
+app.use("/barberos",  barberosRoutes);
+app.use("/barbero",   barberoRoutes); 
 
 module.exports = app;

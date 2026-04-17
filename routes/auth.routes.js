@@ -10,21 +10,13 @@ const { generarCodigo, enviarCorreoRecuperacion }        = require("../services/
 const { guardarCodigo, obtenerCodigo, marcarVerificado,
         eliminarCodigo, codigoEstaExpirado }             = require("../services/auth.service");
 
-// ── Rate limiter: máx 5 intentos de login por IP cada 15 min ─────
-// keyGenerator usa IP + correo para no bloquear IPs compartidas
+// ── Rate limiters ─────────────────────────────────────────────────
 const loginLimiter = rateLimit({
-  windowMs:         15 * 60 * 1000,
-  max:              5,
-  standardHeaders:  true,
-  legacyHeaders:    false,
+  windowMs: 15 * 60 * 1000, max: 5,
+  standardHeaders: true, legacyHeaders: false,
   skipSuccessfulRequests: true,
-  // Bloquear por correo (no por IP) — evita problemas con proxies/red local
-  keyGenerator: (req) => {
-    const correo = req.body?.correo?.trim().toLowerCase() || "unknown"
-    return `login:${correo}`
-  },
+  keyGenerator: (req) => `login:${req.body?.correo?.trim().toLowerCase() || "unknown"}`,
   handler: (req, res) => {
-    const correo = req.body?.correo?.trim() || ""
     const resetEn = new Date(Date.now() + 15 * 60 * 1000)
       .toLocaleTimeString("es-MX", { hour: "2-digit", minute: "2-digit" })
     res.status(429).json({
@@ -33,24 +25,14 @@ const loginLimiter = rateLimit({
   }
 });
 
-// ── Rate limiter: máx 3 solicitudes de código por correo cada hora ──
 const forgotLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000,
-  max:      3,
-  keyGenerator: (req) => {
-    const correo = req.body?.correo?.trim().toLowerCase() || "unknown"
-    return `forgot:${correo}`
-  },
-  message: { error: "Demasiadas solicitudes de recuperación para este correo. Espera una hora." }
+  windowMs: 60 * 60 * 1000, max: 3,
+  keyGenerator: (req) => `forgot:${req.body?.correo?.trim().toLowerCase() || "unknown"}`,
+  message: { error: "Demasiadas solicitudes de recuperación. Espera una hora." }
 });
 
-// ── Generar JWT ───────────────────────────────────────────────────
-function generarToken(barberia) {
-  return jwt.sign(
-    { id: barberia.id, correo: barberia.correo },
-    process.env.JWT_SECRET,
-    { expiresIn: process.env.JWT_EXPIRES_IN || "8h" }
-  );
+function generarToken(payload, expira = "8h") {
+  return jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: expira });
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -72,14 +54,12 @@ router.post("/register", async (req, res) => {
       return res.status(409).json({ error: "El correo ya está registrado" });
 
     const passwordHash = await bcrypt.hash(password, 14);
-
     const [result] = await db.query(
       `INSERT INTO barberia (nombre, direccion, nombre_encargado, telefono, correo, password)
        VALUES (?, ?, ?, ?, ?, ?)`,
       [nombre.trim(), direccion.trim(), nombre_encargado.trim(),
        telefono.trim(), correoNorm, passwordHash]
     );
-
     res.status(201).json({ message: "Barbería registrada correctamente", id: result.insertId });
   } catch (error) {
     console.error("Error en /register:", error);
@@ -88,7 +68,7 @@ router.post("/register", async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────
-// POST /auth/login  — con rate limiting y JWT
+// POST /auth/login — detecta si es barbería o barbero
 // ─────────────────────────────────────────────────────────────────
 router.post("/login", loginLimiter, async (req, res) => {
   const { correo, password } = req.body;
@@ -99,35 +79,68 @@ router.post("/login", loginLimiter, async (req, res) => {
   if (!validarEmail(correo.trim()))
     return res.status(400).json({ error: "El formato del correo no es válido" });
 
+  const correoNorm = correo.trim().toLowerCase();
+
   try {
-    // SELECT solo columnas necesarias — sin SELECT *
-    const [results] = await db.query(
+    // ── 1. Buscar en tabla barberia ───────────────────────────────
+    const [resBarberia] = await db.query(
       `SELECT id, nombre, direccion, nombre_encargado, telefono,
               correo, idSuscripcion, foto_perfil, password
        FROM barberia WHERE correo = ?`,
-      [correo.trim().toLowerCase()]
+      [correoNorm]
     );
 
-    if (results.length === 0)
-      return res.status(401).json({ error: "Correo o contraseña incorrectos" });
+    if (resBarberia.length > 0) {
+      const barberia = resBarberia[0];
+      const valida   = await bcrypt.compare(password, barberia.password);
+      if (!valida)
+        return res.status(401).json({ error: "Correo o contraseña incorrectos" });
 
-    const barberia = results[0];
-    const passwordValida = await bcrypt.compare(password, barberia.password);
+      const token = generarToken({ id: barberia.id, correo: barberia.correo, tipo: "barberia" });
+      const { password: _, ...barberiaSegura } = barberia;
+      return res.json({
+        message: "Login exitoso",
+        tipo: "barberia",
+        token,
+        barberia: barberiaSegura
+      });
+    }
 
-    if (!passwordValida)
-      return res.status(401).json({ error: "Correo o contraseña incorrectos" });
+    // ── 2. Buscar en tabla barberos ───────────────────────────────
+    const [resBarbero] = await db.query(
+      `SELECT id, id_barberia, nombre, correo, foto, activo, password
+       FROM barberos WHERE correo = ?`,
+      [correoNorm]
+    );
 
-    // Generar JWT
-    const token = generarToken(barberia);
+    if (resBarbero.length > 0) {
+      const barbero = resBarbero[0];
 
-    // Devolver datos sin el hash
-    const { password: _omitir, ...barberiaSegura } = barberia;
+      if (!barbero.activo)
+        return res.status(403).json({ error: "Tu cuenta está desactivada. Contacta al dueño del negocio." });
 
-    res.json({
-      message: "Login exitoso",
-      token,
-      barberia: barberiaSegura
-    });
+      const valida = await bcrypt.compare(password, barbero.password);
+      if (!valida)
+        return res.status(401).json({ error: "Correo o contraseña incorrectos" });
+
+      const token = generarToken({
+        id:          barbero.id,
+        id_barberia: barbero.id_barberia,
+        correo:      barbero.correo,
+        tipo:        "barbero"
+      });
+
+      const { password: _, ...barberoSeguro } = barbero;
+      return res.json({
+        message: "Login exitoso",
+        tipo: "barbero",
+        token,
+        barbero: barberoSeguro
+      });
+    }
+
+    // ── 3. No encontrado en ninguna tabla ─────────────────────────
+    return res.status(401).json({ error: "Correo o contraseña incorrectos" });
 
   } catch (error) {
     console.error("Error en /login:", error);
@@ -136,11 +149,10 @@ router.post("/login", loginLimiter, async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────
-// POST /auth/forgot-password  — con rate limiting
+// POST /auth/forgot-password
 // ─────────────────────────────────────────────────────────────────
 router.post("/forgot-password", forgotLimiter, async (req, res) => {
   const { correo } = req.body;
-
   if (!correo || !validarEmail(correo.trim()))
     return res.status(400).json({ error: "Correo inválido" });
 
@@ -150,15 +162,12 @@ router.post("/forgot-password", forgotLimiter, async (req, res) => {
     const [results] = await db.query(
       "SELECT id FROM barberia WHERE correo = ?", [correoNorm]
     );
-
-    // Siempre responder igual aunque no exista (no revelar si está registrado)
     if (results.length === 0)
       return res.status(200).json({ message: "Si el correo está registrado, recibirás un código" });
 
     const codigo = generarCodigo();
     await guardarCodigo(correoNorm, codigo);
     await enviarCorreoRecuperacion(correoNorm, codigo);
-
     res.json({ message: "Código enviado correctamente" });
   } catch (error) {
     await eliminarCodigo(correoNorm).catch(() => {});
@@ -172,26 +181,20 @@ router.post("/forgot-password", forgotLimiter, async (req, res) => {
 // ─────────────────────────────────────────────────────────────────
 router.post("/verify-code", async (req, res) => {
   const { correo, codigo } = req.body;
-
   if (!correo || !codigo)
     return res.status(400).json({ error: "Correo y código son obligatorios" });
 
   const correoNorm = correo.trim().toLowerCase();
-
   try {
     const registro = await obtenerCodigo(correoNorm);
-
     if (!registro)
-      return res.status(400).json({ error: "No hay un código activo para este correo. Solicita uno nuevo." });
-
+      return res.status(400).json({ error: "No hay un código activo para este correo." });
     if (codigoEstaExpirado(registro)) {
       await eliminarCodigo(correoNorm);
       return res.status(400).json({ error: "El código ha expirado. Solicita uno nuevo." });
     }
-
     if (registro.codigo !== codigo.trim())
       return res.status(400).json({ error: "Código incorrecto. Verifica e intenta de nuevo." });
-
     await marcarVerificado(correoNorm);
     res.json({ message: "Código verificado correctamente" });
   } catch (error) {
@@ -205,42 +208,33 @@ router.post("/verify-code", async (req, res) => {
 // ─────────────────────────────────────────────────────────────────
 router.post("/reset-password", async (req, res) => {
   const { correo, codigo, nuevaPassword } = req.body;
-
   if (!correo || !codigo || !nuevaPassword)
     return res.status(400).json({ error: "Faltan datos obligatorios" });
-
   if (!validarPassword(nuevaPassword))
     return res.status(400).json({ error: "La contraseña debe tener mínimo 8 caracteres con letras y números" });
 
   const correoNorm = correo.trim().toLowerCase();
-
   try {
     const registro = await obtenerCodigo(correoNorm);
-
     if (!registro || !registro.verificado)
       return res.status(400).json({ error: "Sesión de recuperación inválida. Empieza de nuevo." });
-
     if (codigoEstaExpirado(registro)) {
       await eliminarCodigo(correoNorm);
       return res.status(400).json({ error: "El código ha expirado. Solicita uno nuevo." });
     }
-
     if (registro.codigo !== codigo.trim())
       return res.status(400).json({ error: "Código incorrecto." });
 
     const passwordHash = await bcrypt.hash(nuevaPassword, 14);
-
     const [result] = await db.query(
       "UPDATE barberia SET password = ? WHERE correo = ?",
       [passwordHash, correoNorm]
     );
-
     if (result.affectedRows === 0)
       return res.status(404).json({ error: "Cuenta no encontrada" });
 
     await eliminarCodigo(correoNorm);
     res.json({ message: "Contraseña actualizada correctamente" });
-
   } catch (error) {
     console.error("Error en /reset-password:", error);
     res.status(500).json({ error: "Error interno del servidor" });
