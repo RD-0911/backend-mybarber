@@ -1,12 +1,33 @@
-const express = require("express");
-const bcrypt  = require("bcryptjs");
-const jwt     = require("jsonwebtoken");
-const router  = express.Router();
-const db      = require("../config/db");
+const express    = require("express");
+const bcrypt     = require("bcryptjs");
+const jwt        = require("jsonwebtoken");
+const rateLimit  = require("express-rate-limit");
+const router     = express.Router();
+const db         = require("../config/db");
 const { verificarAdmin } = require("../middlewares/adminAuth.middleware");
 
+// ── Rate limiter: máx 5 intentos de login admin cada 15 min ──────
+const adminLoginLimiter = rateLimit({
+  windowMs:  15 * 60 * 1000,
+  max:       5,
+  standardHeaders: true,
+  legacyHeaders:   false,
+  skipSuccessfulRequests: true,
+  keyGenerator: (req) => {
+    const correo = req.body?.correo?.trim().toLowerCase() || "unknown";
+    return `admin_login:${correo}`;
+  },
+  handler: (_req, res) => {
+    const resetEn = new Date(Date.now() + 15 * 60 * 1000)
+      .toLocaleTimeString("es-MX", { hour: "2-digit", minute: "2-digit" });
+    res.status(429).json({
+      error: `Demasiados intentos fallidos. Intenta de nuevo a las ${resetEn}.`
+    });
+  }
+});
+
 // ── POST /admin/login ─────────────────────────────────────────────
-router.post("/login", async (req, res) => {
+router.post("/login", adminLoginLimiter, async (req, res) => {
   const { correo, password } = req.body;
   if (!correo || !password)
     return res.status(400).json({ error: "Correo y contraseña requeridos" });
@@ -20,8 +41,10 @@ router.post("/login", async (req, res) => {
   if (correo.trim().toLowerCase() !== adminEmail.toLowerCase())
     return res.status(401).json({ error: "Credenciales incorrectas" });
 
-  const valida = await bcrypt.compare(password, adminPassword).catch(() => false)
-    || password === adminPassword; // fallback si no está hasheada
+  // Solo bcrypt — sin fallback de texto plano
+  // Si ADMIN_PASSWORD aún no está hasheada, cámbiala con:
+  //   node -e "const b=require('bcryptjs');b.hash('tuPassword',14).then(console.log)"
+  const valida = await bcrypt.compare(password, adminPassword).catch(() => false);
 
   if (!valida)
     return res.status(401).json({ error: "Credenciales incorrectas" });
@@ -150,12 +173,18 @@ router.delete("/barberias/:id", verificarAdmin, async (req, res) => {
   try {
     const [[b]] = await db.query("SELECT id FROM barberia WHERE id=?", [req.params.id]);
     if (!b) return res.status(404).json({ error: "Barbería no encontrada" });
-    // Eliminar en cascada
-    await db.query("DELETE FROM citas WHERE id_barberia=?",           [req.params.id]);
-    await db.query("DELETE FROM servicios WHERE id_barberia=?",       [req.params.id]);
+
+    // Eliminar en cascada — detalle_citas primero para respetar FK
+    await db.query(
+      "DELETE dc FROM detalle_citas dc INNER JOIN citas c ON dc.id_cita = c.id WHERE c.id_barberia=?",
+      [req.params.id]
+    );
+    await db.query("DELETE FROM citas WHERE id_barberia=?",              [req.params.id]);
+    await db.query("DELETE FROM servicios WHERE id_barberia=?",          [req.params.id]);
     await db.query("DELETE FROM productos_barberia WHERE id_barberia=?", [req.params.id]);
     await db.query("DELETE FROM configuracion_barberia WHERE id_barberia=?", [req.params.id]);
-    await db.query("DELETE FROM barberia WHERE id=?",                 [req.params.id]);
+    await db.query("DELETE FROM barberia WHERE id=?",                    [req.params.id]);
+
     res.json({ message: "Barbería eliminada" });
   } catch (e) {
     res.status(500).json({ error: "Error al eliminar" });

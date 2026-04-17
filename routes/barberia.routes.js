@@ -1,18 +1,18 @@
-const express    = require("express");
-const router     = express.Router();
-const db         = require("../config/db");
-const multer     = require("multer");
-const cloudinary = require("cloudinary").v2;
+const express     = require("express");
+const router      = express.Router();
+const bcrypt      = require("bcryptjs");
+const db          = require("../config/db");
+const multer      = require("multer");
+const cloudinary  = require("cloudinary").v2;
 const streamifier = require("streamifier");
+const { verificarToken } = require("../middlewares/auth.middleware");
 
-// ── Cloudinary config ────────────────────────────────────────────
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key:    process.env.CLOUDINARY_API_KEY,
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-// ── Multer en memoria (no guarda en disco) ───────────────────────
 const upload = multer({
   storage: multer.memoryStorage(),
   fileFilter: (_req, file, cb) => {
@@ -23,7 +23,6 @@ const upload = multer({
   limits: { fileSize: 3 * 1024 * 1024 }
 });
 
-// Helper: sube buffer a Cloudinary
 function subirACloudinary(buffer, publicId) {
   return new Promise((resolve, reject) => {
     const stream = cloudinary.uploader.upload_stream(
@@ -34,8 +33,16 @@ function subirACloudinary(buffer, publicId) {
   });
 }
 
+function esOwner(req, res) {
+  if (String(req.barberia.id) !== String(req.params.id)) {
+    res.status(403).json({ error: "No tienes permiso para modificar esta barbería" });
+    return false;
+  }
+  return true;
+}
+
 // ─────────────────────────────────────────────────────────────────
-// GET /barberia/:id
+// GET /barberia/:id  — público
 // ─────────────────────────────────────────────────────────────────
 router.get("/:id", async (req, res) => {
   try {
@@ -50,18 +57,14 @@ router.get("/:id", async (req, res) => {
   }
 });
 
-// ─────────────────────────────────────────────────────────────────
-// POST /barberia/:id/foto  →  Subir foto a Cloudinary
-// ─────────────────────────────────────────────────────────────────
-router.post("/:id/foto", upload.single("foto"), async (req, res) => {
+// POST /barberia/:id/foto  [JWT + owner]
+router.post("/:id/foto", verificarToken, upload.single("foto"), async (req, res) => {
+  if (!esOwner(req, res)) return;
   if (!req.file) return res.status(400).json({ error: "No se recibió ninguna imagen" });
-
   try {
     const publicId = `barberia_${req.params.id}`;
     const result   = await subirACloudinary(req.file.buffer, publicId);
-
     await db.query("UPDATE barberia SET foto_perfil=? WHERE id=?", [result.secure_url, req.params.id]);
-
     res.json({ message: "Foto actualizada", foto_perfil: result.secure_url });
   } catch (e) {
     console.error("Error POST foto:", e);
@@ -69,10 +72,9 @@ router.post("/:id/foto", upload.single("foto"), async (req, res) => {
   }
 });
 
-// ─────────────────────────────────────────────────────────────────
-// DELETE /barberia/:id/foto  →  Eliminar foto de Cloudinary
-// ─────────────────────────────────────────────────────────────────
-router.delete("/:id/foto", async (req, res) => {
+// DELETE /barberia/:id/foto  [JWT + owner]
+router.delete("/:id/foto", verificarToken, async (req, res) => {
+  if (!esOwner(req, res)) return;
   try {
     await cloudinary.uploader.destroy(`mybarber/barberia_${req.params.id}`);
     await db.query("UPDATE barberia SET foto_perfil=NULL WHERE id=?", [req.params.id]);
@@ -83,72 +85,93 @@ router.delete("/:id/foto", async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────
-// GET /barberia/:id/servicios
+// GET /barberia/:id/servicios  — público, incluye tipo y contenido
 // ─────────────────────────────────────────────────────────────────
 router.get("/:id/servicios", async (req, res) => {
   try {
-    const [rows] = await db.query(
-      "SELECT id, descripcion, precio, hora_estimada, IFNULL(activo, 1) AS activo FROM servicios WHERE id_barberia = ? ORDER BY id ASC",
-      [req.params.id]
-    );
+    let rows;
+    try {
+      [rows] = await db.query(
+        `SELECT id, descripcion, IFNULL(tipo,'servicio') AS tipo,
+                IFNULL(contenido,'') AS contenido,
+                precio, hora_estimada, IFNULL(activo,1) AS activo
+         FROM servicios WHERE id_barberia = ? ORDER BY tipo ASC, id ASC`,
+        [req.params.id]
+      );
+    } catch (_) {
+      // Fallback si las columnas tipo/contenido aún no existen
+      [rows] = await db.query(
+        `SELECT id, descripcion, 'servicio' AS tipo, '' AS contenido,
+                precio, hora_estimada, IFNULL(activo,1) AS activo
+         FROM servicios WHERE id_barberia = ? ORDER BY id ASC`,
+        [req.params.id]
+      );
+    }
     res.json(rows);
   } catch (e) {
     res.status(500).json({ error: "Error al obtener servicios" });
   }
 });
 
-// POST /barberia/:id/servicios
-router.post("/:id/servicios", async (req, res) => {
-  const { descripcion, precio, hora_estimada } = req.body;
+// POST /barberia/:id/servicios  [JWT + owner]
+router.post("/:id/servicios", verificarToken, async (req, res) => {
+  if (!esOwner(req, res)) return;
+  const { descripcion, precio, hora_estimada, tipo = "servicio", contenido = "" } = req.body;
   if (!descripcion || precio === undefined || precio === null || hora_estimada === undefined || hora_estimada === null)
     return res.status(400).json({ error: "descripcion, precio y hora_estimada son requeridos" });
+  const tipoValido = ["servicio", "paquete"].includes(tipo) ? tipo : "servicio";
   try {
     let result;
     try {
+      [result] = await db.query(
+        "INSERT INTO servicios (id_barberia, descripcion, tipo, contenido, precio, hora_estimada, activo) VALUES (?,?,?,?,?,?,1)",
+        [req.params.id, descripcion.trim(), tipoValido, contenido?.trim() || null, parseFloat(precio), parseInt(hora_estimada)]
+      );
+    } catch (_) {
+      // Fallback sin tipo/contenido si las columnas no existen
       [result] = await db.query(
         "INSERT INTO servicios (id_barberia, descripcion, precio, hora_estimada, activo) VALUES (?,?,?,?,1)",
         [req.params.id, descripcion.trim(), parseFloat(precio), parseInt(hora_estimada)]
       );
-    } catch (_) {
-      [result] = await db.query(
-        "INSERT INTO servicios (id_barberia, descripcion, precio, hora_estimada) VALUES (?,?,?,?)",
-        [req.params.id, descripcion.trim(), parseFloat(precio), parseInt(hora_estimada)]
-      );
     }
-    res.status(201).json({ message: "Servicio creado", id: result.insertId });
+    res.status(201).json({ message: "Creado correctamente", id: result.insertId });
   } catch (e) {
-    res.status(500).json({ error: "Error al crear servicio" });
+    res.status(500).json({ error: "Error al crear" });
   }
 });
 
-// PUT /barberia/:id/servicios/:sid
-router.put("/:id/servicios/:sid", async (req, res) => {
-  const { descripcion, precio, hora_estimada, activo } = req.body;
+// PUT /barberia/:id/servicios/:sid  [JWT + owner]
+router.put("/:id/servicios/:sid", verificarToken, async (req, res) => {
+  if (!esOwner(req, res)) return;
+  const { descripcion, precio, hora_estimada, activo, tipo = "servicio", contenido = "" } = req.body;
   if (!descripcion || precio === undefined || precio === null || hora_estimada === undefined || hora_estimada === null)
     return res.status(400).json({ error: "Faltan campos requeridos" });
+  const tipoValido = ["servicio", "paquete"].includes(tipo) ? tipo : "servicio";
   try {
     let result;
     try {
       [result] = await db.query(
-        "UPDATE servicios SET descripcion=?, precio=?, hora_estimada=?, activo=? WHERE id=? AND id_barberia=?",
-        [descripcion.trim(), parseFloat(precio), parseInt(hora_estimada), activo !== undefined ? (activo ? 1 : 0) : 1, req.params.sid, req.params.id]
+        "UPDATE servicios SET descripcion=?, tipo=?, contenido=?, precio=?, hora_estimada=?, activo=? WHERE id=? AND id_barberia=?",
+        [descripcion.trim(), tipoValido, contenido?.trim() || null, parseFloat(precio), parseInt(hora_estimada),
+         activo !== undefined ? (activo ? 1 : 0) : 1, req.params.sid, req.params.id]
       );
     } catch (_) {
-      // Fallback si no existe columna activo
       [result] = await db.query(
-        "UPDATE servicios SET descripcion=?, precio=?, hora_estimada=? WHERE id=? AND id_barberia=?",
-        [descripcion.trim(), parseFloat(precio), parseInt(hora_estimada), req.params.sid, req.params.id]
+        "UPDATE servicios SET descripcion=?, precio=?, hora_estimada=?, activo=? WHERE id=? AND id_barberia=?",
+        [descripcion.trim(), parseFloat(precio), parseInt(hora_estimada),
+         activo !== undefined ? (activo ? 1 : 0) : 1, req.params.sid, req.params.id]
       );
     }
     if (result.affectedRows === 0) return res.status(404).json({ error: "Servicio no encontrado" });
-    res.json({ message: "Servicio actualizado" });
+    res.json({ message: "Actualizado correctamente" });
   } catch (e) {
-    res.status(500).json({ error: "Error al actualizar servicio" });
+    res.status(500).json({ error: "Error al actualizar" });
   }
 });
 
-// PATCH /barberia/:id/servicios/:sid/toggle
-router.patch("/:id/servicios/:sid/toggle", async (req, res) => {
+// PATCH /barberia/:id/servicios/:sid/toggle  [JWT + owner]
+router.patch("/:id/servicios/:sid/toggle", verificarToken, async (req, res) => {
+  if (!esOwner(req, res)) return;
   try {
     const [rows] = await db.query(
       "SELECT IFNULL(activo,1) AS activo FROM servicios WHERE id=? AND id_barberia=?",
@@ -156,33 +179,30 @@ router.patch("/:id/servicios/:sid/toggle", async (req, res) => {
     );
     if (!rows.length) return res.status(404).json({ error: "Servicio no encontrado" });
     const nuevoEstado = rows[0].activo ? 0 : 1;
-    try {
-      await db.query("UPDATE servicios SET activo=? WHERE id=? AND id_barberia=?",
-        [nuevoEstado, req.params.sid, req.params.id]);
-    } catch (_) {
-      return res.status(400).json({ error: "Agrega la columna: ALTER TABLE servicios ADD COLUMN activo TINYINT DEFAULT 1;" });
-    }
+    await db.query("UPDATE servicios SET activo=? WHERE id=? AND id_barberia=?",
+      [nuevoEstado, req.params.sid, req.params.id]);
     res.json({ message: nuevoEstado ? "Activado" : "Desactivado", activo: nuevoEstado });
   } catch (e) {
     res.status(500).json({ error: "Error al cambiar estado" });
   }
 });
 
-// DELETE /barberia/:id/servicios/:sid
-router.delete("/:id/servicios/:sid", async (req, res) => {
+// DELETE /barberia/:id/servicios/:sid  [JWT + owner]
+router.delete("/:id/servicios/:sid", verificarToken, async (req, res) => {
+  if (!esOwner(req, res)) return;
   try {
     const [result] = await db.query(
       "DELETE FROM servicios WHERE id=? AND id_barberia=?",
       [req.params.sid, req.params.id]
     );
     if (result.affectedRows === 0) return res.status(404).json({ error: "Servicio no encontrado" });
-    res.json({ message: "Servicio eliminado" });
+    res.json({ message: "Eliminado correctamente" });
   } catch (e) {
     res.status(500).json({ error: "Error al eliminar. Puede tener citas asociadas." });
   }
 });
 
-// GET /barberia/:id/horario
+// GET /barberia/:id/horario  — público
 router.get("/:id/horario", async (req, res) => {
   const DEFAULT_HORARIO = { diasLaborales:[1,2,3,4,5,6], horaInicio:"09:00", horaFin:"18:00", intervaloMinutos:30 };
   try {
@@ -197,8 +217,9 @@ router.get("/:id/horario", async (req, res) => {
   }
 });
 
-// PUT /barberia/:id/horario
-router.put("/:id/horario", async (req, res) => {
+// PUT /barberia/:id/horario  [JWT + owner]
+router.put("/:id/horario", verificarToken, async (req, res) => {
+  if (!esOwner(req, res)) return;
   const config = req.body;
   if (!config.diasLaborales || !config.horaInicio || !config.horaFin)
     return res.status(400).json({ error: "Faltan datos de horario" });
@@ -215,8 +236,9 @@ router.put("/:id/horario", async (req, res) => {
   }
 });
 
-// GET /barberia/:id/clientes/buscar?q=texto
-router.get("/:id/clientes/buscar", async (req, res) => {
+// GET /barberia/:id/clientes/buscar  [JWT + owner]
+router.get("/:id/clientes/buscar", verificarToken, async (req, res) => {
+  if (!esOwner(req, res)) return;
   const { q } = req.query;
   if (!q || q.trim().length < 2) return res.json([]);
   try {
@@ -242,8 +264,9 @@ router.get("/:id/clientes/buscar", async (req, res) => {
   }
 });
 
-// PUT /barberia/:id/perfil
-router.put("/:id/perfil", async (req, res) => {
+// PUT /barberia/:id/perfil  [JWT + owner]
+router.put("/:id/perfil", verificarToken, async (req, res) => {
+  if (!esOwner(req, res)) return;
   const { nombre, direccion, nombre_encargado, telefono, correo } = req.body;
   if (!nombre || !nombre_encargado || !telefono || !correo)
     return res.status(400).json({ error: "Faltan campos obligatorios" });
@@ -259,9 +282,9 @@ router.put("/:id/perfil", async (req, res) => {
   }
 });
 
-// PUT /barberia/:id/password
-router.put("/:id/password", async (req, res) => {
-  const bcrypt = require("bcryptjs");
+// PUT /barberia/:id/password  [JWT + owner]
+router.put("/:id/password", verificarToken, async (req, res) => {
+  if (!esOwner(req, res)) return;
   const { actual, nueva } = req.body;
   if (!actual || !nueva) return res.status(400).json({ error: "Contraseña actual y nueva son requeridas" });
   if (nueva.length < 8) return res.status(400).json({ error: "La nueva contraseña debe tener mínimo 8 caracteres" });

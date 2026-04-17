@@ -1,9 +1,10 @@
-const express    = require("express");
-const router     = express.Router();
-const db         = require("../config/db");
-const multer     = require("multer");
-const cloudinary = require("cloudinary").v2;
+const express     = require("express");
+const router      = express.Router();
+const db          = require("../config/db");
+const multer      = require("multer");
+const cloudinary  = require("cloudinary").v2;
 const streamifier = require("streamifier");
+const { verificarToken } = require("../middlewares/auth.middleware");
 
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -49,30 +50,41 @@ async function initTable() {
 }
 initTable().catch(() => {});
 
-// GET /productos/:barberiaId  — admin
-router.get("/:barberiaId", async (req, res) => {
+// ── Helper de ownership ───────────────────────────────────────────
+function esOwner(req, res) {
+  if (String(req.barberia.id) !== String(req.params.barberiaId)) {
+    res.status(403).json({ error: "No tienes permiso para modificar estos productos" });
+    return false;
+  }
+  return true;
+}
+
+// GET /productos/:barberiaId  — admin  [JWT + owner]
+router.get("/:barberiaId", verificarToken, async (req, res) => {
+  if (!esOwner(req, res)) return;
   try {
     const [rows] = await db.query(
-      "SELECT * FROM productos_barberia WHERE id_barberia=? ORDER BY id DESC",
+      "SELECT id, nombre, descripcion, precio, imagen_url, stock, estado, creado_en FROM productos_barberia WHERE id_barberia=? ORDER BY id DESC",
       [req.params.barberiaId]
     );
     res.json(rows);
   } catch (e) { res.status(500).json({ error: "Error al obtener productos" }); }
 });
 
-// GET /productos/:barberiaId/publico  — catálogo público (excluye ocultos)
+// GET /productos/:barberiaId/publico  — catálogo público (sin JWT)
 router.get("/:barberiaId/publico", async (req, res) => {
   try {
     const [rows] = await db.query(
-      "SELECT id,nombre,descripcion,precio,imagen_url,stock,estado FROM productos_barberia WHERE id_barberia=? AND estado != 'oculto' ORDER BY id DESC",
+      "SELECT id, nombre, descripcion, precio, imagen_url, stock, estado FROM productos_barberia WHERE id_barberia=? AND estado != 'oculto' ORDER BY id DESC",
       [req.params.barberiaId]
     );
     res.json(rows);
   } catch (e) { res.status(500).json({ error: "Error al obtener catálogo" }); }
 });
 
-// POST /productos/:barberiaId  — crear producto
-router.post("/:barberiaId", upload.single("imagen"), async (req, res) => {
+// POST /productos/:barberiaId  — crear producto  [JWT + owner]
+router.post("/:barberiaId", verificarToken, upload.single("imagen"), async (req, res) => {
+  if (!esOwner(req, res)) return;
   const { nombre, descripcion, precio, stock, estado } = req.body;
   if (!nombre || precio === undefined)
     return res.status(400).json({ error: "nombre y precio son requeridos" });
@@ -90,8 +102,9 @@ router.post("/:barberiaId", upload.single("imagen"), async (req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: "Error al crear producto" }); }
 });
 
-// PUT /productos/:barberiaId/:id  — editar producto
-router.put("/:barberiaId/:id", upload.single("imagen"), async (req, res) => {
+// PUT /productos/:barberiaId/:id  — editar producto  [JWT + owner]
+router.put("/:barberiaId/:id", verificarToken, upload.single("imagen"), async (req, res) => {
+  if (!esOwner(req, res)) return;
   const { nombre, descripcion, precio, stock, estado } = req.body;
   if (!nombre || precio === undefined)
     return res.status(400).json({ error: "nombre y precio son requeridos" });
@@ -110,8 +123,9 @@ router.put("/:barberiaId/:id", upload.single("imagen"), async (req, res) => {
   } catch (e) { res.status(500).json({ error: "Error al actualizar producto" }); }
 });
 
-// DELETE /productos/:barberiaId/:id
-router.delete("/:barberiaId/:id", async (req, res) => {
+// DELETE /productos/:barberiaId/:id  [JWT + owner]
+router.delete("/:barberiaId/:id", verificarToken, async (req, res) => {
+  if (!esOwner(req, res)) return;
   try {
     const [rows] = await db.query("SELECT imagen_url FROM productos_barberia WHERE id=? AND id_barberia=?", [req.params.id, req.params.barberiaId]);
     if (rows.length && rows[0].imagen_url) {

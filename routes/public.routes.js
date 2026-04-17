@@ -5,9 +5,15 @@ const db      = require("../config/db");
 const { validarDatosCitaPublica, sanitizar, sanitizarFacebook } = require("../validators/citas.validator");
 const { verificarToken, verificarTokenOpcional } = require("../middlewares/auth.middleware");
 
-// ── Helpers de validación ─────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────
 const esEnteroPositivo = (v) => Number.isInteger(Number(v)) && Number(v) > 0;
 const esFechaValida    = (v) => /^\d{4}-\d{2}-\d{2}$/.test(v) && !isNaN(Date.parse(v));
+
+// Redondea la duración al bloque de hora completa hacia arriba
+// Ej: 30→60, 90→120, 120→120, 45→60
+function minutosBloqueo(duracionMin) {
+  return Math.ceil(duracionMin / 60) * 60;
+}
 
 // ─────────────────────────────────────────────────────────────────
 // GET /public/barberia/:id
@@ -28,7 +34,7 @@ router.get("/barberia/:id", async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────
-// GET /public/servicios/:id_barberia
+// GET /public/servicios/:id_barberia  — incluye tipo y contenido
 // ─────────────────────────────────────────────────────────────────
 router.get("/servicios/:id_barberia", async (req, res) => {
   if (!esEnteroPositivo(req.params.id_barberia))
@@ -37,12 +43,16 @@ router.get("/servicios/:id_barberia", async (req, res) => {
     let rows;
     try {
       [rows] = await db.query(
-        "SELECT id, descripcion, precio, hora_estimada FROM servicios WHERE id_barberia = ? AND IFNULL(activo,1) = 1",
+        `SELECT id, descripcion, IFNULL(tipo,'servicio') AS tipo,
+                IFNULL(contenido,'') AS contenido, precio, hora_estimada
+         FROM servicios
+         WHERE id_barberia = ? AND IFNULL(activo,1) = 1`,
         [req.params.id_barberia]
       );
     } catch (_) {
+      // Fallback si las columnas tipo/contenido no existen aún
       [rows] = await db.query(
-        "SELECT id, descripcion, precio, hora_estimada FROM servicios WHERE id_barberia = ?",
+        "SELECT id, descripcion, 'servicio' AS tipo, '' AS contenido, precio, hora_estimada FROM servicios WHERE id_barberia = ?",
         [req.params.id_barberia]
       );
     }
@@ -59,7 +69,6 @@ router.get("/citas-barberia/:id_barberia", verificarToken, async (req, res) => {
   if (!esEnteroPositivo(req.params.id_barberia))
     return res.status(400).json({ error: "ID inválido" });
 
-  // Solo puede ver sus propias citas
   if (String(req.barberia.id) !== String(req.params.id_barberia))
     return res.status(403).json({ error: "No tienes permiso para ver estas citas" });
 
@@ -70,6 +79,7 @@ router.get("/citas-barberia/:id_barberia", verificarToken, async (req, res) => {
         CONCAT(cl.nombre, ' ', cl.primerAp) AS cliente_nombre,
         cl.telefono,
         s.descripcion AS servicio_desc,
+        IFNULL(s.tipo,'servicio') AS servicio_tipo,
         s.hora_estimada
        FROM citas c
        LEFT JOIN clientes cl ON cl.id = c.id_cliente
@@ -119,28 +129,23 @@ router.get("/disponibilidad/:id_barberia", async (req, res) => {
 // ─────────────────────────────────────────────────────────────────
 router.post("/citas", verificarTokenOpcional, async (req, res) => {
   const {
-    id_barberia, id_servicio, fechaInicio, fechaFin,
+    id_barberia, id_servicio, fechaInicio,
     nombre, primerAp, telefono, usuarioFacebook,
     id_cliente: id_cliente_param,
   } = req.body;
 
-  // Determinar si viene del admin verificando el JWT — NO del body
   const esAdmin = !!req.barberia && String(req.barberia.id) === String(id_barberia);
 
-  // Validar IDs obligatorios
   if (!esEnteroPositivo(id_barberia) || !esEnteroPositivo(id_servicio) || !fechaInicio)
     return res.status(400).json({ error: "Faltan datos obligatorios o son inválidos" });
 
-  // Validar fecha
   const inicioDate = new Date(fechaInicio);
   if (isNaN(inicioDate.getTime()))
     return res.status(400).json({ error: "Fecha de inicio inválida" });
-  
-  // Rechazar citas en el pasado
-if (inicioDate < new Date())
-  return res.status(400).json({ error: "No puedes agendar una cita en una hora que ya pasó." });
 
-  // Validar datos del cliente solo en reservas públicas
+  if (inicioDate < new Date())
+    return res.status(400).json({ error: "No puedes agendar una cita en una hora que ya pasó." });
+
   if (!esAdmin) {
     const erroresValidacion = validarDatosCitaPublica(req.body);
     if (erroresValidacion.length > 0)
@@ -151,7 +156,6 @@ if (inicioDate < new Date())
     let id_cliente = esAdmin ? id_cliente_param : null;
 
     if (!esAdmin) {
-      // Buscar o crear cliente público
       const [existe] = await db.query(
         "SELECT id FROM clientes WHERE telefono = ?", [telefono.trim()]
       );
@@ -190,9 +194,13 @@ if (inicioDate < new Date())
 
     const { precio, hora_estimada } = servicios[0];
     const inicio = inicioDate;
-    const fin = fechaFin
-      ? new Date(fechaFin)
-      : new Date(inicio.getTime() + hora_estimada * 60000);
+
+    // ── Lógica de bloqueo: redondear al bloque de hora completa ──
+    // 30 min → 60 min bloqueados
+    // 90 min → 120 min bloqueados
+    // 120 min → 120 min bloqueados
+    const bloqueoMin = minutosBloqueo(hora_estimada);
+    const fin = new Date(inicio.getTime() + bloqueoMin * 60000);
 
     // Verificar conflicto de horario
     try {
@@ -222,7 +230,6 @@ if (inicioDate < new Date())
 
   } catch (e) {
     console.error("Error POST /public/citas:", e.message);
-    // No exponer detalles del error SQL al cliente
     res.status(500).json({ error: "Error al crear la cita. Intenta de nuevo." });
   }
 });
@@ -240,7 +247,6 @@ router.put("/citas/:id/estado", verificarToken, async (req, res) => {
     return res.status(400).json({ error: "Estado no válido" });
 
   try {
-    // Verificar que la cita pertenece a la barbería del token
     const [citas] = await db.query(
       "SELECT id_barberia FROM citas WHERE id = ?", [req.params.id]
     );
