@@ -5,12 +5,9 @@ const db      = require("../config/db");
 const { validarDatosCitaPublica, sanitizar, sanitizarFacebook } = require("../validators/citas.validator");
 const { verificarToken, verificarTokenOpcional } = require("../middlewares/auth.middleware");
 
-// ── Helpers ───────────────────────────────────────────────────────
 const esEnteroPositivo = (v) => Number.isInteger(Number(v)) && Number(v) > 0;
 const esFechaValida    = (v) => /^\d{4}-\d{2}-\d{2}$/.test(v) && !isNaN(Date.parse(v));
 
-// Redondea la duración al bloque de hora completa hacia arriba
-// Ej: 30→60, 90→120, 120→120, 45→60
 function minutosBloqueo(duracionMin) {
   return Math.ceil(duracionMin / 60) * 60;
 }
@@ -28,13 +25,11 @@ router.get("/barberia/:id", async (req, res) => {
     );
     if (!rows.length) return res.status(404).json({ error: "Barbería no encontrada" });
     res.json(rows[0]);
-  } catch (_) {
-    res.status(500).json({ error: "Error del servidor" });
-  }
+  } catch (_) { res.status(500).json({ error: "Error del servidor" }); }
 });
 
 // ─────────────────────────────────────────────────────────────────
-// GET /public/servicios/:id_barberia  — incluye tipo y contenido
+// GET /public/servicios/:id_barberia
 // ─────────────────────────────────────────────────────────────────
 router.get("/servicios/:id_barberia", async (req, res) => {
   if (!esEnteroPositivo(req.params.id_barberia))
@@ -45,21 +40,32 @@ router.get("/servicios/:id_barberia", async (req, res) => {
       [rows] = await db.query(
         `SELECT id, descripcion, IFNULL(tipo,'servicio') AS tipo,
                 IFNULL(contenido,'') AS contenido, precio, hora_estimada
-         FROM servicios
-         WHERE id_barberia = ? AND IFNULL(activo,1) = 1`,
+         FROM servicios WHERE id_barberia = ? AND IFNULL(activo,1) = 1`,
         [req.params.id_barberia]
       );
     } catch (_) {
-      // Fallback si las columnas tipo/contenido no existen aún
       [rows] = await db.query(
         "SELECT id, descripcion, 'servicio' AS tipo, '' AS contenido, precio, hora_estimada FROM servicios WHERE id_barberia = ?",
         [req.params.id_barberia]
       );
     }
     res.json(rows);
-  } catch (_) {
-    res.status(500).json({ error: "Error del servidor" });
-  }
+  } catch (_) { res.status(500).json({ error: "Error del servidor" }); }
+});
+
+// ─────────────────────────────────────────────────────────────────
+// GET /public/barberos/:id_barberia — barberos activos para reserva pública
+// ─────────────────────────────────────────────────────────────────
+router.get("/barberos/:id_barberia", async (req, res) => {
+  if (!esEnteroPositivo(req.params.id_barberia))
+    return res.status(400).json({ error: "ID inválido" });
+  try {
+    const [rows] = await db.query(
+      "SELECT id, nombre, foto FROM barberos WHERE id_barberia = ? AND activo = 1 ORDER BY nombre ASC",
+      [req.params.id_barberia]
+    );
+    res.json(rows);
+  } catch (_) { res.status(500).json({ error: "Error del servidor" }); }
 });
 
 // ─────────────────────────────────────────────────────────────────
@@ -68,60 +74,76 @@ router.get("/servicios/:id_barberia", async (req, res) => {
 router.get("/citas-barberia/:id_barberia", verificarToken, async (req, res) => {
   if (!esEnteroPositivo(req.params.id_barberia))
     return res.status(400).json({ error: "ID inválido" });
-
   if (String(req.barberia.id) !== String(req.params.id_barberia))
     return res.status(403).json({ error: "No tienes permiso para ver estas citas" });
-
   try {
     const [rows] = await db.query(
       `SELECT
         c.id, c.fechaInicio, c.fechaFin, c.estado, c.precio,
+        c.id_barbero,
         CONCAT(cl.nombre, ' ', cl.primerAp) AS cliente_nombre,
         cl.telefono,
-        s.descripcion AS servicio_desc,
+        s.descripcion  AS servicio_desc,
         IFNULL(s.tipo,'servicio') AS servicio_tipo,
-        s.hora_estimada
+        s.hora_estimada,
+        b.nombre AS barbero_nombre
        FROM citas c
-       LEFT JOIN clientes cl ON cl.id = c.id_cliente
+       LEFT JOIN clientes cl    ON cl.id = c.id_cliente
        LEFT JOIN detalle_citas dc ON dc.id_cita = c.id
-       LEFT JOIN servicios s ON s.id = dc.id_servicio
+       LEFT JOIN servicios s    ON s.id = dc.id_servicio
+       LEFT JOIN barberos b     ON b.id = c.id_barbero
        WHERE c.id_barberia = ?
        ORDER BY c.fechaInicio DESC`,
       [req.params.id_barberia]
     );
     res.json(rows);
-  } catch (_) {
-    res.status(500).json({ error: "Error del servidor" });
-  }
+  } catch (_) { res.status(500).json({ error: "Error del servidor" }); }
 });
 
 // ─────────────────────────────────────────────────────────────────
-// GET /public/disponibilidad/:id_barberia?fecha=YYYY-MM-DD
+// GET /public/disponibilidad/:id_barberia?fecha=YYYY-MM-DD&id_barbero=X
+// Si se pasa id_barbero → disponibilidad solo de ese barbero
+// Si no → disponibilidad global (sin barberos registrados)
 // ─────────────────────────────────────────────────────────────────
 router.get("/disponibilidad/:id_barberia", async (req, res) => {
   if (!esEnteroPositivo(req.params.id_barberia))
     return res.status(400).json({ error: "ID inválido" });
-
-  const { fecha } = req.query;
+  const { fecha, id_barbero } = req.query;
   if (!fecha) return res.status(400).json({ error: "Parámetro fecha requerido" });
-  if (!esFechaValida(fecha)) return res.status(400).json({ error: "Formato de fecha inválido. Usa YYYY-MM-DD" });
+  if (!esFechaValida(fecha)) return res.status(400).json({ error: "Formato de fecha inválido" });
 
   try {
-    const [rows] = await db.query(
-      `SELECT c.fechaInicio, c.fechaFin, s.hora_estimada
-       FROM citas c
-       LEFT JOIN detalle_citas dc ON dc.id_cita = c.id
-       LEFT JOIN servicios s ON s.id = dc.id_servicio
-       WHERE c.id_barberia = ?
-         AND DATE(c.fechaInicio) = ?
-         AND c.estado NOT IN ('cancelada')
-       ORDER BY c.fechaInicio ASC`,
-      [req.params.id_barberia, fecha]
-    );
+    let rows;
+    if (id_barbero && esEnteroPositivo(id_barbero)) {
+      // Disponibilidad por barbero específico
+      [rows] = await db.query(
+        `SELECT c.fechaInicio, c.fechaFin, s.hora_estimada
+         FROM citas c
+         LEFT JOIN detalle_citas dc ON dc.id_cita = c.id
+         LEFT JOIN servicios s ON s.id = dc.id_servicio
+         WHERE c.id_barberia = ?
+           AND c.id_barbero = ?
+           AND DATE(c.fechaInicio) = ?
+           AND c.estado NOT IN ('cancelada')
+         ORDER BY c.fechaInicio ASC`,
+        [req.params.id_barberia, id_barbero, fecha]
+      );
+    } else {
+      // Disponibilidad global (sin barberos)
+      [rows] = await db.query(
+        `SELECT c.fechaInicio, c.fechaFin, s.hora_estimada
+         FROM citas c
+         LEFT JOIN detalle_citas dc ON dc.id_cita = c.id
+         LEFT JOIN servicios s ON s.id = dc.id_servicio
+         WHERE c.id_barberia = ?
+           AND DATE(c.fechaInicio) = ?
+           AND c.estado NOT IN ('cancelada')
+         ORDER BY c.fechaInicio ASC`,
+        [req.params.id_barberia, fecha]
+      );
+    }
     res.json(rows);
-  } catch (_) {
-    res.status(500).json({ error: "Error del servidor" });
-  }
+  } catch (_) { res.status(500).json({ error: "Error del servidor" }); }
 });
 
 // ─────────────────────────────────────────────────────────────────
@@ -132,6 +154,7 @@ router.post("/citas", verificarTokenOpcional, async (req, res) => {
     id_barberia, id_servicio, fechaInicio,
     nombre, primerAp, telefono, usuarioFacebook,
     id_cliente: id_cliente_param,
+    id_barbero: id_barbero_param,
   } = req.body;
 
   const esAdmin = !!req.barberia && String(req.barberia.id) === String(id_barberia);
@@ -142,7 +165,6 @@ router.post("/citas", verificarTokenOpcional, async (req, res) => {
   const inicioDate = new Date(fechaInicio);
   if (isNaN(inicioDate.getTime()))
     return res.status(400).json({ error: "Fecha de inicio inválida" });
-
   if (inicioDate < new Date())
     return res.status(400).json({ error: "No puedes agendar una cita en una hora que ya pasó." });
 
@@ -164,12 +186,8 @@ router.post("/citas", verificarTokenOpcional, async (req, res) => {
       } else {
         const [nuevo] = await db.query(
           "INSERT INTO clientes (nombre, primerAp, telefono, usuarioFacebook) VALUES (?,?,?,?)",
-          [
-            sanitizar(nombre),
-            sanitizar(primerAp),
-            telefono.trim(),
-            usuarioFacebook ? sanitizarFacebook(usuarioFacebook) : null
-          ]
+          [sanitizar(nombre), sanitizar(primerAp), telefono.trim(),
+           usuarioFacebook ? sanitizarFacebook(usuarioFacebook) : null]
         );
         id_cliente = nuevo.insertId;
       }
@@ -184,7 +202,7 @@ router.post("/citas", verificarTokenOpcional, async (req, res) => {
     if (!id_cliente || !esEnteroPositivo(id_cliente))
       return res.status(400).json({ error: "Cliente no especificado o inválido" });
 
-    // Verificar que el servicio pertenece a la barbería
+    // Verificar servicio
     const [servicios] = await db.query(
       "SELECT precio, hora_estimada FROM servicios WHERE id = ? AND id_barberia = ?",
       [id_servicio, id_barberia]
@@ -193,17 +211,60 @@ router.post("/citas", verificarTokenOpcional, async (req, res) => {
       return res.status(400).json({ error: "Servicio no válido para esta barbería" });
 
     const { precio, hora_estimada } = servicios[0];
-    const inicio = inicioDate;
-
-    // ── Lógica de bloqueo: redondear al bloque de hora completa ──
-    // 30 min → 60 min bloqueados
-    // 90 min → 120 min bloqueados
-    // 120 min → 120 min bloqueados
+    const inicio     = inicioDate;
     const bloqueoMin = minutosBloqueo(hora_estimada);
-    const fin = new Date(inicio.getTime() + bloqueoMin * 60000);
+    const fin        = new Date(inicio.getTime() + bloqueoMin * 60000);
 
-    // Verificar conflicto de horario
-    try {
+    // ── Determinar id_barbero ────────────────────────────────────
+    let id_barbero = null;
+
+    // Verificar si hay barberos activos en la barbería
+    const [barberosActivos] = await db.query(
+      "SELECT id FROM barberos WHERE id_barberia = ? AND activo = 1", [id_barberia]
+    );
+    const hayBarberos = barberosActivos.length > 0;
+
+    if (hayBarberos) {
+      if (id_barbero_param && esEnteroPositivo(id_barbero_param)) {
+        // Cliente eligió barbero específico — verificar que pertenece a esta barbería
+        const [bVerif] = await db.query(
+          "SELECT id FROM barberos WHERE id = ? AND id_barberia = ? AND activo = 1",
+          [id_barbero_param, id_barberia]
+        );
+        if (!bVerif.length)
+          return res.status(400).json({ error: "El barbero seleccionado no está disponible" });
+        id_barbero = id_barbero_param;
+      } else {
+        // "Sin preferencia" → asignar el primer barbero libre en ese horario
+        for (const b of barberosActivos) {
+          const [conf] = await db.query(
+            `SELECT id FROM citas
+             WHERE id_barbero = ?
+               AND estado NOT IN ('cancelada')
+               AND fechaFin IS NOT NULL
+               AND fechaInicio < ? AND fechaFin > ?`,
+            [b.id, fin.toISOString(), inicio.toISOString()]
+          );
+          if (conf.length === 0) { id_barbero = b.id; break; }
+        }
+        if (!id_barbero)
+          return res.status(409).json({ error: "No hay barberos disponibles en este horario. Por favor elige otra hora." });
+      }
+
+      // Verificar conflicto para ese barbero específico
+      const [conflictos] = await db.query(
+        `SELECT id FROM citas
+         WHERE id_barbero = ?
+           AND estado NOT IN ('cancelada')
+           AND fechaFin IS NOT NULL
+           AND fechaInicio < ? AND fechaFin > ?`,
+        [id_barbero, fin.toISOString(), inicio.toISOString()]
+      );
+      if (conflictos.length > 0)
+        return res.status(409).json({ error: "Este barbero ya tiene una cita en ese horario. Por favor elige otro." });
+
+    } else {
+      // Sin barberos — verificar conflicto global
       const [conflictos] = await db.query(
         `SELECT id FROM citas
          WHERE id_barberia = ?
@@ -214,11 +275,12 @@ router.post("/citas", verificarTokenOpcional, async (req, res) => {
       );
       if (conflictos.length > 0)
         return res.status(409).json({ error: "Este horario ya está ocupado. Por favor elige otro." });
-    } catch (_) {}
+    }
 
+    // ── Crear la cita ────────────────────────────────────────────
     const [cita] = await db.query(
-      "INSERT INTO citas (fechaInicio, fechaFin, id_barberia, id_cliente, estado, precio) VALUES (?,?,?,?,'pendiente',?)",
-      [inicio, fin, id_barberia, id_cliente, precio]
+      "INSERT INTO citas (fechaInicio, fechaFin, id_barberia, id_cliente, id_barbero, estado, precio) VALUES (?,?,?,?,?,'pendiente',?)",
+      [inicio, fin, id_barberia, id_cliente, id_barbero, precio]
     );
 
     await db.query(
@@ -240,27 +302,18 @@ router.post("/citas", verificarTokenOpcional, async (req, res) => {
 router.put("/citas/:id/estado", verificarToken, async (req, res) => {
   if (!esEnteroPositivo(req.params.id))
     return res.status(400).json({ error: "ID inválido" });
-
   const { estado } = req.body;
   const ESTADOS_VALIDOS = ["pendiente", "confirmada", "cancelada", "completada"];
   if (!ESTADOS_VALIDOS.includes(estado))
     return res.status(400).json({ error: "Estado no válido" });
-
   try {
-    const [citas] = await db.query(
-      "SELECT id_barberia FROM citas WHERE id = ?", [req.params.id]
-    );
-    if (!citas.length)
-      return res.status(404).json({ error: "Cita no encontrada" });
-
+    const [citas] = await db.query("SELECT id_barberia FROM citas WHERE id = ?", [req.params.id]);
+    if (!citas.length) return res.status(404).json({ error: "Cita no encontrada" });
     if (String(citas[0].id_barberia) !== String(req.barberia.id))
       return res.status(403).json({ error: "No tienes permiso para modificar esta cita" });
-
     await db.query("UPDATE citas SET estado = ? WHERE id = ?", [estado, req.params.id]);
     res.json({ message: "Estado actualizado", estado });
-  } catch (_) {
-    res.status(500).json({ error: "Error del servidor" });
-  }
+  } catch (_) { res.status(500).json({ error: "Error del servidor" }); }
 });
 
 module.exports = router;
