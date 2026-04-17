@@ -8,6 +8,8 @@ const clientesRoutes  = require("./routes/clientes.routes");
 const publicRoutes    = require("./routes/public.routes");
 const productosRoutes = require("./routes/productos.routes");
 const adminRoutes     = require("./routes/admin.routes");
+const barberosRoutes  = require("./routes/barberos.routes");
+const barberoRoutes   = require("./routes/barbero.routes");
 
 const app = express();
 
