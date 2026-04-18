@@ -9,7 +9,6 @@ const { verificarToken }      = require("../middlewares/auth.middleware");
 // ─────────────────────────────────────────────────────────────────
 router.get("/", verificarToken, async (req, res) => {
   try {
-    // Solo devuelve los clientes vinculados a la barbería del token
     const [results] = await db.query(
       `SELECT c.id, c.nombre, c.primerAp, c.segundoAp, c.telefono,
               c.usuarioFacebook, c.usuarioInstagram
@@ -39,10 +38,8 @@ router.get("/:id", verificarToken, async (req, res) => {
        WHERE c.id = ? AND cb.id_barberia = ?`,
       [req.params.id, req.barberia.id]
     );
-
     if (results.length === 0)
       return res.status(404).json({ error: "Cliente no encontrado" });
-
     res.json(results[0]);
   } catch (error) {
     console.error("Error en GET /clientes/:id:", error);
@@ -66,7 +63,6 @@ router.post("/", verificarToken, async (req, res) => {
       [nombre, primerAp, segundoAp || null, telefono, usuarioFacebook || null, usuarioInstagram || null]
     );
 
-    // Vincular el cliente a la barbería autenticada
     await db.query(
       "INSERT IGNORE INTO cliente_barberia (id_cliente, id_barberia) VALUES (?,?)",
       [result.insertId, req.barberia.id]
@@ -83,7 +79,6 @@ router.post("/", verificarToken, async (req, res) => {
 // PUT /clientes/:id  →  Actualizar cliente  [JWT + pertenencia]
 // ─────────────────────────────────────────────────────────────────
 router.put("/:id", verificarToken, async (req, res) => {
-  // Verificar que el cliente pertenece a esta barbería
   const [pertenece] = await db.query(
     "SELECT 1 FROM cliente_barberia WHERE id_cliente=? AND id_barberia=?",
     [req.params.id, req.barberia.id]
@@ -102,10 +97,8 @@ router.put("/:id", verificarToken, async (req, res) => {
       "UPDATE clientes SET nombre=?, primerAp=?, segundoAp=?, telefono=?, usuarioFacebook=?, usuarioInstagram=? WHERE id=?",
       [nombre, primerAp, segundoAp || null, telefono, usuarioFacebook || null, usuarioInstagram || null, req.params.id]
     );
-
     if (result.affectedRows === 0)
       return res.status(404).json({ error: "Cliente no encontrado" });
-
     res.json({ message: "Cliente actualizado correctamente" });
   } catch (error) {
     console.error("Error en PUT /clientes/:id:", error);
@@ -114,30 +107,65 @@ router.put("/:id", verificarToken, async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────
-// DELETE /clientes/:id  →  Eliminar cliente  [JWT + pertenencia]
+// DELETE /clientes/:id  →  Desvincular cliente de esta barbería
+//
+// Estrategia segura:
+//   1. Verifica pertenencia.
+//   2. Cancela citas activas (pendiente/confirmada) del cliente en esta barbería.
+//   3. Elimina el vínculo en cliente_barberia.
+//   4. Si el cliente ya no pertenece a ninguna barbería, lo elimina completamente.
 // ─────────────────────────────────────────────────────────────────
 router.delete("/:id", verificarToken, async (req, res) => {
-  // Verificar que el cliente pertenece a esta barbería
-  const [pertenece] = await db.query(
-    "SELECT 1 FROM cliente_barberia WHERE id_cliente=? AND id_barberia=?",
-    [req.params.id, req.barberia.id]
-  ).catch(() => [[]]);
-  if (!pertenece.length)
-    return res.status(403).json({ error: "No tienes permiso para eliminar este cliente" });
-
+  const conn = await db.getConnection();
   try {
-    const [result] = await db.query(
-      "DELETE FROM clientes WHERE id = ?",
-      [req.params.id]
+    await conn.beginTransaction();
+
+    // 1. Verificar pertenencia
+    const [[pertenece]] = await conn.query(
+      "SELECT 1 FROM cliente_barberia WHERE id_cliente=? AND id_barberia=?",
+      [req.params.id, req.barberia.id]
+    );
+    if (!pertenece) {
+      await conn.rollback();
+      return res.status(403).json({ error: "No tienes permiso para eliminar este cliente" });
+    }
+
+    // 2. Verificar citas activas en esta barbería
+    const [[{ activas }]] = await conn.query(
+      `SELECT COUNT(*) AS activas FROM citas
+       WHERE id_cliente=? AND id_barberia=? AND estado IN ('pendiente','confirmada')`,
+      [req.params.id, req.barberia.id]
+    );
+    if (activas > 0) {
+      await conn.rollback();
+      return res.status(409).json({
+        error: `El cliente tiene ${activas} cita(s) activa(s). Cancélalas antes de eliminarlo.`,
+      });
+    }
+
+    // 3. Desvincular de esta barbería
+    await conn.query(
+      "DELETE FROM cliente_barberia WHERE id_cliente=? AND id_barberia=?",
+      [req.params.id, req.barberia.id]
     );
 
-    if (result.affectedRows === 0)
-      return res.status(404).json({ error: "Cliente no encontrado" });
+    // 4. Si ya no pertenece a ninguna barbería, eliminar completamente
+    const [[{ otros }]] = await conn.query(
+      "SELECT COUNT(*) AS otros FROM cliente_barberia WHERE id_cliente=?",
+      [req.params.id]
+    );
+    if (otros === 0) {
+      await conn.query("DELETE FROM clientes WHERE id=?", [req.params.id]);
+    }
 
+    await conn.commit();
     res.json({ message: "Cliente eliminado correctamente" });
   } catch (error) {
+    await conn.rollback();
     console.error("Error en DELETE /clientes/:id:", error);
     res.status(500).json({ error: "Error al eliminar cliente" });
+  } finally {
+    conn.release();
   }
 });
 

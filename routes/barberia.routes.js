@@ -1,17 +1,10 @@
-const express     = require("express");
-const router      = express.Router();
-const bcrypt      = require("bcryptjs");
-const db          = require("../config/db");
-const multer      = require("multer");
-const cloudinary  = require("cloudinary").v2;
-const streamifier = require("streamifier");
-const { verificarToken } = require("../middlewares/auth.middleware");
-
-cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key:    process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET,
-});
+const express  = require("express");
+const router   = express.Router();
+const bcrypt   = require("bcryptjs");
+const multer   = require("multer");
+const db       = require("../config/db");
+const { subirACloudinary, cloudinary } = require("../config/cloudinary");
+const { verificarToken }              = require("../middlewares/auth.middleware");
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -20,18 +13,8 @@ const upload = multer({
     if (allowed.includes(file.mimetype)) cb(null, true);
     else cb(new Error("Solo se permiten imágenes (jpg, png, webp)"), false);
   },
-  limits: { fileSize: 3 * 1024 * 1024 }
+  limits: { fileSize: 3 * 1024 * 1024 },
 });
-
-function subirACloudinary(buffer, publicId) {
-  return new Promise((resolve, reject) => {
-    const stream = cloudinary.uploader.upload_stream(
-      { public_id: publicId, folder: "mybarber", overwrite: true, resource_type: "image" },
-      (error, result) => { if (error) reject(error); else resolve(result); }
-    );
-    streamifier.createReadStream(buffer).pipe(stream);
-  });
-}
 
 function esOwner(req, res) {
   if (String(req.barberia.id) !== String(req.params.id)) {
@@ -62,8 +45,7 @@ router.post("/:id/foto", verificarToken, upload.single("foto"), async (req, res)
   if (!esOwner(req, res)) return;
   if (!req.file) return res.status(400).json({ error: "No se recibió ninguna imagen" });
   try {
-    const publicId = `barberia_${req.params.id}`;
-    const result   = await subirACloudinary(req.file.buffer, publicId);
+    const result = await subirACloudinary(req.file.buffer, `barberia_${req.params.id}`);
     await db.query("UPDATE barberia SET foto_perfil=? WHERE id=?", [result.secure_url, req.params.id]);
     res.json({ message: "Foto actualizada", foto_perfil: result.secure_url });
   } catch (e) {
@@ -85,7 +67,7 @@ router.delete("/:id/foto", verificarToken, async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────
-// GET /barberia/:id/servicios  — público, incluye tipo y contenido
+// GET /barberia/:id/servicios  — público
 // ─────────────────────────────────────────────────────────────────
 router.get("/:id/servicios", async (req, res) => {
   try {
@@ -99,7 +81,6 @@ router.get("/:id/servicios", async (req, res) => {
         [req.params.id]
       );
     } catch (_) {
-      // Fallback si las columnas tipo/contenido aún no existen
       [rows] = await db.query(
         `SELECT id, descripcion, 'servicio' AS tipo, '' AS contenido,
                 precio, hora_estimada, IFNULL(activo,1) AS activo
@@ -117,7 +98,7 @@ router.get("/:id/servicios", async (req, res) => {
 router.post("/:id/servicios", verificarToken, async (req, res) => {
   if (!esOwner(req, res)) return;
   const { descripcion, precio, hora_estimada, tipo = "servicio", contenido = "" } = req.body;
-  if (!descripcion || precio === undefined || precio === null || hora_estimada === undefined || hora_estimada === null)
+  if (!descripcion || precio === undefined || precio === null || hora_estimada === undefined)
     return res.status(400).json({ error: "descripcion, precio y hora_estimada son requeridos" });
   const tipoValido = ["servicio", "paquete"].includes(tipo) ? tipo : "servicio";
   try {
@@ -128,7 +109,6 @@ router.post("/:id/servicios", verificarToken, async (req, res) => {
         [req.params.id, descripcion.trim(), tipoValido, contenido?.trim() || null, parseFloat(precio), parseInt(hora_estimada)]
       );
     } catch (_) {
-      // Fallback sin tipo/contenido si las columnas no existen
       [result] = await db.query(
         "INSERT INTO servicios (id_barberia, descripcion, precio, hora_estimada, activo) VALUES (?,?,?,?,1)",
         [req.params.id, descripcion.trim(), parseFloat(precio), parseInt(hora_estimada)]
@@ -144,7 +124,7 @@ router.post("/:id/servicios", verificarToken, async (req, res) => {
 router.put("/:id/servicios/:sid", verificarToken, async (req, res) => {
   if (!esOwner(req, res)) return;
   const { descripcion, precio, hora_estimada, activo, tipo = "servicio", contenido = "" } = req.body;
-  if (!descripcion || precio === undefined || precio === null || hora_estimada === undefined || hora_estimada === null)
+  if (!descripcion || precio === undefined || hora_estimada === undefined)
     return res.status(400).json({ error: "Faltan campos requeridos" });
   const tipoValido = ["servicio", "paquete"].includes(tipo) ? tipo : "servicio";
   try {
@@ -204,7 +184,7 @@ router.delete("/:id/servicios/:sid", verificarToken, async (req, res) => {
 
 // GET /barberia/:id/horario  — público
 router.get("/:id/horario", async (req, res) => {
-  const DEFAULT_HORARIO = { diasLaborales:[1,2,3,4,5,6], horaInicio:"09:00", horaFin:"18:00", intervaloMinutos:30 };
+  const DEFAULT_HORARIO = { diasLaborales: [1, 2, 3, 4, 5, 6], horaInicio: "09:00", horaFin: "18:00", intervaloMinutos: 30 };
   try {
     try {
       await db.query(`CREATE TABLE IF NOT EXISTS configuracion_barberia (id_barberia INT PRIMARY KEY, horario_config TEXT)`);
@@ -273,7 +253,7 @@ router.put("/:id/perfil", verificarToken, async (req, res) => {
   try {
     const [result] = await db.query(
       "UPDATE barberia SET nombre=?, direccion=?, nombre_encargado=?, telefono=?, correo=? WHERE id=?",
-      [nombre.trim(), direccion?.trim() || '', nombre_encargado.trim(), telefono.trim(), correo.trim().toLowerCase(), req.params.id]
+      [nombre.trim(), direccion?.trim() || "", nombre_encargado.trim(), telefono.trim(), correo.trim().toLowerCase(), req.params.id]
     );
     if (result.affectedRows === 0) return res.status(404).json({ error: "Barbería no encontrada" });
     res.json({ message: "Datos actualizados correctamente" });

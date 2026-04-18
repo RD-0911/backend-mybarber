@@ -54,7 +54,7 @@ router.get("/servicios/:id_barberia", async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────
-// GET /public/barberos/:id_barberia — barberos activos para reserva pública
+// GET /public/barberos/:id_barberia
 // ─────────────────────────────────────────────────────────────────
 router.get("/barberos/:id_barberia", async (req, res) => {
   if (!esEnteroPositivo(req.params.id_barberia))
@@ -101,9 +101,7 @@ router.get("/citas-barberia/:id_barberia", verificarToken, async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────
-// GET /public/disponibilidad/:id_barberia?fecha=YYYY-MM-DD&id_barbero=X
-// Si se pasa id_barbero → disponibilidad solo de ese barbero
-// Si no → disponibilidad global (sin barberos registrados)
+// GET /public/disponibilidad/:id_barberia
 // ─────────────────────────────────────────────────────────────────
 router.get("/disponibilidad/:id_barberia", async (req, res) => {
   if (!esEnteroPositivo(req.params.id_barberia))
@@ -115,7 +113,6 @@ router.get("/disponibilidad/:id_barberia", async (req, res) => {
   try {
     let rows;
     if (id_barbero && esEnteroPositivo(id_barbero)) {
-      // Disponibilidad por barbero específico
       [rows] = await db.query(
         `SELECT c.fechaInicio, c.fechaFin, s.hora_estimada
          FROM citas c
@@ -129,7 +126,6 @@ router.get("/disponibilidad/:id_barberia", async (req, res) => {
         [req.params.id_barberia, id_barbero, fecha]
       );
     } else {
-      // Disponibilidad global (sin barberos)
       [rows] = await db.query(
         `SELECT c.fechaInicio, c.fechaFin, s.hora_estimada
          FROM citas c
@@ -147,7 +143,7 @@ router.get("/disponibilidad/:id_barberia", async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────
-// POST /public/citas
+// POST /public/citas  — con transacción para atomicidad
 // ─────────────────────────────────────────────────────────────────
 router.post("/citas", verificarTokenOpcional, async (req, res) => {
   const {
@@ -174,41 +170,48 @@ router.post("/citas", verificarTokenOpcional, async (req, res) => {
       return res.status(400).json({ error: erroresValidacion[0], detalles: erroresValidacion });
   }
 
+  // ── Usar transacción para que cita + detalle_cita sean atómicos ──
+  const conn = await db.getConnection();
   try {
+    await conn.beginTransaction();
+
+    // ── Resolver id_cliente ──────────────────────────────────────
     let id_cliente = esAdmin ? id_cliente_param : null;
 
     if (!esAdmin) {
-      const [existe] = await db.query(
+      const [existe] = await conn.query(
         "SELECT id FROM clientes WHERE telefono = ?", [telefono.trim()]
       );
       if (existe.length > 0) {
         id_cliente = existe[0].id;
       } else {
-        const [nuevo] = await db.query(
+        const [nuevo] = await conn.query(
           "INSERT INTO clientes (nombre, primerAp, telefono, usuarioFacebook) VALUES (?,?,?,?)",
           [sanitizar(nombre), sanitizar(primerAp), telefono.trim(),
            usuarioFacebook ? sanitizarFacebook(usuarioFacebook) : null]
         );
         id_cliente = nuevo.insertId;
       }
-      try {
-        await db.query(
-          "INSERT IGNORE INTO cliente_barberia (id_cliente, id_barberia) VALUES (?,?)",
-          [id_cliente, id_barberia]
-        );
-      } catch (_) {}
+      await conn.query(
+        "INSERT IGNORE INTO cliente_barberia (id_cliente, id_barberia) VALUES (?,?)",
+        [id_cliente, id_barberia]
+      ).catch(() => {});
     }
 
-    if (!id_cliente || !esEnteroPositivo(id_cliente))
+    if (!id_cliente || !esEnteroPositivo(id_cliente)) {
+      await conn.rollback();
       return res.status(400).json({ error: "Cliente no especificado o inválido" });
+    }
 
-    // Verificar servicio
-    const [servicios] = await db.query(
+    // ── Verificar servicio ───────────────────────────────────────
+    const [servicios] = await conn.query(
       "SELECT precio, hora_estimada FROM servicios WHERE id = ? AND id_barberia = ?",
       [id_servicio, id_barberia]
     );
-    if (!servicios.length)
+    if (!servicios.length) {
+      await conn.rollback();
       return res.status(400).json({ error: "Servicio no válido para esta barbería" });
+    }
 
     const { precio, hora_estimada } = servicios[0];
     const inicio     = inicioDate;
@@ -218,26 +221,25 @@ router.post("/citas", verificarTokenOpcional, async (req, res) => {
     // ── Determinar id_barbero ────────────────────────────────────
     let id_barbero = null;
 
-    // Verificar si hay barberos activos en la barbería
-    const [barberosActivos] = await db.query(
+    const [barberosActivos] = await conn.query(
       "SELECT id FROM barberos WHERE id_barberia = ? AND activo = 1", [id_barberia]
     );
     const hayBarberos = barberosActivos.length > 0;
 
     if (hayBarberos) {
       if (id_barbero_param && esEnteroPositivo(id_barbero_param)) {
-        // Cliente eligió barbero específico — verificar que pertenece a esta barbería
-        const [bVerif] = await db.query(
+        const [bVerif] = await conn.query(
           "SELECT id FROM barberos WHERE id = ? AND id_barberia = ? AND activo = 1",
           [id_barbero_param, id_barberia]
         );
-        if (!bVerif.length)
+        if (!bVerif.length) {
+          await conn.rollback();
           return res.status(400).json({ error: "El barbero seleccionado no está disponible" });
+        }
         id_barbero = id_barbero_param;
       } else {
-        // "Sin preferencia" → asignar el primer barbero libre en ese horario
         for (const b of barberosActivos) {
-          const [conf] = await db.query(
+          const [conf] = await conn.query(
             `SELECT id FROM citas
              WHERE id_barbero = ?
                AND estado NOT IN ('cancelada')
@@ -247,12 +249,13 @@ router.post("/citas", verificarTokenOpcional, async (req, res) => {
           );
           if (conf.length === 0) { id_barbero = b.id; break; }
         }
-        if (!id_barbero)
+        if (!id_barbero) {
+          await conn.rollback();
           return res.status(409).json({ error: "No hay barberos disponibles en este horario. Por favor elige otra hora." });
+        }
       }
 
-      // Verificar conflicto para ese barbero específico
-      const [conflictos] = await db.query(
+      const [conflictos] = await conn.query(
         `SELECT id FROM citas
          WHERE id_barbero = ?
            AND estado NOT IN ('cancelada')
@@ -260,12 +263,13 @@ router.post("/citas", verificarTokenOpcional, async (req, res) => {
            AND fechaInicio < ? AND fechaFin > ?`,
         [id_barbero, fin.toISOString(), inicio.toISOString()]
       );
-      if (conflictos.length > 0)
+      if (conflictos.length > 0) {
+        await conn.rollback();
         return res.status(409).json({ error: "Este barbero ya tiene una cita en ese horario. Por favor elige otro." });
+      }
 
     } else {
-      // Sin barberos — verificar conflicto global
-      const [conflictos] = await db.query(
+      const [conflictos] = await conn.query(
         `SELECT id FROM citas
          WHERE id_barberia = ?
            AND estado NOT IN ('cancelada')
@@ -273,26 +277,33 @@ router.post("/citas", verificarTokenOpcional, async (req, res) => {
            AND fechaInicio < ? AND fechaFin > ?`,
         [id_barberia, fin.toISOString(), inicio.toISOString()]
       );
-      if (conflictos.length > 0)
+      if (conflictos.length > 0) {
+        await conn.rollback();
         return res.status(409).json({ error: "Este horario ya está ocupado. Por favor elige otro." });
+      }
     }
 
     // ── Crear la cita ────────────────────────────────────────────
-    const [cita] = await db.query(
+    const [cita] = await conn.query(
       "INSERT INTO citas (fechaInicio, fechaFin, id_barberia, id_cliente, id_barbero, estado, precio) VALUES (?,?,?,?,?,'pendiente',?)",
       [inicio, fin, id_barberia, id_cliente, id_barbero, precio]
     );
 
-    await db.query(
+    // ── Crear detalle (mismo commit) ─────────────────────────────
+    await conn.query(
       "INSERT INTO detalle_citas (id_cita, id_servicio, cantidad, precio_unitario, precio_total) VALUES (?,?,1,?,?)",
       [cita.insertId, id_servicio, precio, precio]
     );
 
+    await conn.commit();
     res.status(201).json({ message: "¡Cita creada exitosamente!", id_cita: cita.insertId });
 
   } catch (e) {
+    await conn.rollback();
     console.error("Error POST /public/citas:", e.message);
     res.status(500).json({ error: "Error al crear la cita. Intenta de nuevo." });
+  } finally {
+    conn.release();
   }
 });
 
