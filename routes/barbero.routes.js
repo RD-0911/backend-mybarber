@@ -179,4 +179,99 @@ router.delete("/foto", verificarBarbero, async (req, res) => {
   }
 });
 
+// ─────────────────────────────────────────────────────────────────
+// GET /barbero/clientes/buscar?q=... — buscar clientes de su barbería
+// ─────────────────────────────────────────────────────────────────
+router.get("/clientes/buscar", verificarBarbero, async (req, res) => {
+  const { q } = req.query;
+  if (!q || q.trim().length < 2) return res.json([]);
+  try {
+    const b = `%${q.trim()}%`;
+    const [rows] = await db.query(
+      `SELECT c.id, c.nombre, c.primerAp, c.telefono
+       FROM clientes c
+       INNER JOIN cliente_barberia cb ON cb.id_cliente = c.id
+       WHERE cb.id_barberia = ?
+         AND (CONCAT(c.nombre, ' ', c.primerAp) LIKE ? OR c.telefono LIKE ?)
+       ORDER BY c.nombre ASC LIMIT 10`,
+      [req.barbero.id_barberia, b, b]
+    );
+    res.json(rows);
+  } catch (e) {
+    res.status(500).json({ error: "Error al buscar clientes" });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────
+// POST /barbero/citas — agendar una cita (asignada a este barbero)
+// ─────────────────────────────────────────────────────────────────
+router.post("/citas", verificarBarbero, async (req, res) => {
+  const { id_cliente, id_servicio, fechaInicio } = req.body;
+  const id_barberia = req.barbero.id_barberia;
+  const id_barbero  = req.barbero.id;
+
+  if (!id_cliente || !id_servicio || !fechaInicio)
+    return res.status(400).json({ error: "Cliente, servicio y fecha son obligatorios" });
+
+  const inicioDate = new Date(fechaInicio);
+  if (isNaN(inicioDate.getTime()))
+    return res.status(400).json({ error: "Fecha inválida" });
+  if (inicioDate < new Date())
+    return res.status(400).json({ error: "No puedes agendar en una fecha pasada" });
+
+  const conn = await db.getConnection();
+  try {
+    await conn.beginTransaction();
+
+    // Verificar servicio
+    const [servicios] = await conn.query(
+      "SELECT precio, hora_estimada FROM servicios WHERE id = ? AND id_barberia = ?",
+      [id_servicio, id_barberia]
+    );
+    if (!servicios.length) {
+      await conn.rollback();
+      return res.status(400).json({ error: "Servicio no válido" });
+    }
+
+    const { precio, hora_estimada } = servicios[0];
+    const bloqueoMin = Math.ceil(hora_estimada / 60) * 60;
+    const fin        = new Date(inicioDate.getTime() + bloqueoMin * 60000);
+
+    // Verificar conflicto del barbero en ese horario
+    const [conflictos] = await conn.query(
+      `SELECT id FROM citas
+       WHERE id_barbero = ?
+         AND estado NOT IN ('cancelada')
+         AND fechaFin IS NOT NULL
+         AND fechaInicio < ? AND fechaFin > ?`,
+      [id_barbero, fin.toISOString(), inicioDate.toISOString()]
+    );
+    if (conflictos.length > 0) {
+      await conn.rollback();
+      return res.status(409).json({ error: "Ya tienes una cita en ese horario" });
+    }
+
+    // Crear la cita
+    const [cita] = await conn.query(
+      "INSERT INTO citas (fechaInicio, fechaFin, id_barberia, id_cliente, id_barbero, estado, precio) VALUES (?,?,?,?,?,'pendiente',?)",
+      [inicioDate, fin, id_barberia, id_cliente, id_barbero, precio]
+    );
+
+    // Crear detalle
+    await conn.query(
+      "INSERT INTO detalle_citas (id_cita, id_servicio, cantidad, precio_unitario, precio_total) VALUES (?,?,1,?,?)",
+      [cita.insertId, id_servicio, precio, precio]
+    );
+
+    await conn.commit();
+    res.status(201).json({ message: "Cita creada correctamente", id_cita: cita.insertId });
+  } catch (e) {
+    await conn.rollback();
+    console.error("Error POST /barbero/citas:", e.message);
+    res.status(500).json({ error: "Error al crear la cita" });
+  } finally {
+    conn.release();
+  }
+});
+
 module.exports = router;
