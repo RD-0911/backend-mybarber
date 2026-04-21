@@ -1,5 +1,6 @@
 const express = require("express");
 const cors    = require("cors");
+const helmet  = require("helmet");
 const path    = require("path");
 
 const authRoutes      = require("./routes/auth.routes");
@@ -12,6 +13,12 @@ const barberosRoutes  = require("./routes/barberos.routes");
 const barberoRoutes   = require("./routes/barbero.routes");
 
 const app = express();
+
+// Seguridad: headers HTTP seguros automáticos
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: "cross-origin" }, // permite imágenes de Cloudinary
+  contentSecurityPolicy: false, // desactivado porque el frontend lo maneja Netlify
+}));
 
 const allowedOrigins = [
   process.env.FRONTEND_URL,
