@@ -238,21 +238,24 @@ router.post("/citas", verificarTokenOpcional, async (req, res) => {
         }
         id_barbero = id_barbero_param;
       } else {
-        for (const b of barberosActivos) {
-          const [conf] = await conn.query(
-            `SELECT id FROM citas
-             WHERE id_barbero = ?
-               AND estado NOT IN ('cancelada')
-               AND fechaFin IS NOT NULL
-               AND fechaInicio < ? AND fechaFin > ?`,
-            [b.id, fin.toISOString(), inicio.toISOString()]
-          );
-          if (conf.length === 0) { id_barbero = b.id; break; }
-        }
-        if (!id_barbero) {
+        // 1 sola query en vez de N queries — obtiene IDs de barberos sin conflicto
+        const bIds = barberosActivos.map(b => b.id);
+        const placeholders = bIds.map(() => "?").join(",");
+        const [ocupados] = await conn.query(
+          `SELECT DISTINCT id_barbero FROM citas
+           WHERE id_barbero IN (${placeholders})
+             AND estado NOT IN ('cancelada')
+             AND fechaFin IS NOT NULL
+             AND fechaInicio < ? AND fechaFin > ?`,
+          [...bIds, fin.toISOString(), inicio.toISOString()]
+        );
+        const ocupadosSet = new Set(ocupados.map(r => r.id_barbero));
+        const libre = barberosActivos.find(b => !ocupadosSet.has(b.id));
+        if (!libre) {
           await conn.rollback();
           return res.status(409).json({ error: "No hay barberos disponibles en este horario. Por favor elige otra hora." });
         }
+        id_barbero = libre.id;
       }
 
       const [conflictos] = await conn.query(

@@ -6,6 +6,12 @@ const db       = require("../config/db");
 const { subirACloudinary, cloudinary } = require("../config/cloudinary");
 const { verificarToken }              = require("../middlewares/auth.middleware");
 
+// ── Inicialización única al arrancar ──────────────────────────────
+db.query(`CREATE TABLE IF NOT EXISTS configuracion_barberia (
+  id_barberia INT PRIMARY KEY,
+  horario_config TEXT
+)`).catch(e => console.error("Error creando configuracion_barberia:", e.message));
+
 const upload = multer({
   storage: multer.memoryStorage(),
   fileFilter: (_req, file, cb) => {
@@ -186,13 +192,13 @@ router.delete("/:id/servicios/:sid", verificarToken, async (req, res) => {
 router.get("/:id/horario", async (req, res) => {
   const DEFAULT_HORARIO = { diasLaborales: [1, 2, 3, 4, 5, 6], horaInicio: "09:00", horaFin: "18:00", intervaloMinutos: 30 };
   try {
-    try {
-      await db.query(`CREATE TABLE IF NOT EXISTS configuracion_barberia (id_barberia INT PRIMARY KEY, horario_config TEXT)`);
-      const [rows] = await db.query("SELECT horario_config FROM configuracion_barberia WHERE id_barberia=?", [req.params.id]);
-      if (rows.length && rows[0].horario_config) return res.json(JSON.parse(rows[0].horario_config));
-    } catch (_) {}
+    const [rows] = await db.query(
+      "SELECT horario_config FROM configuracion_barberia WHERE id_barberia=?",
+      [req.params.id]
+    );
+    if (rows.length && rows[0].horario_config) return res.json(JSON.parse(rows[0].horario_config));
     res.json(DEFAULT_HORARIO);
-  } catch (e) {
+  } catch (_) {
     res.json(DEFAULT_HORARIO);
   }
 });
@@ -205,7 +211,6 @@ router.put("/:id/horario", verificarToken, async (req, res) => {
     return res.status(400).json({ error: "Faltan datos de horario" });
   const configStr = JSON.stringify(config);
   try {
-    await db.query(`CREATE TABLE IF NOT EXISTS configuracion_barberia (id_barberia INT PRIMARY KEY, horario_config TEXT)`);
     await db.query(
       "INSERT INTO configuracion_barberia (id_barberia, horario_config) VALUES (?,?) ON DUPLICATE KEY UPDATE horario_config=?",
       [req.params.id, configStr, configStr]
