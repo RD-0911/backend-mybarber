@@ -14,10 +14,13 @@ const barberoRoutes   = require("./routes/barbero.routes");
 
 const app = express();
 
+// IP real del cliente detrás del proxy de Render
+app.set("trust proxy", 1);
+
 // Seguridad: headers HTTP seguros automáticos
 app.use(helmet({
-  crossOriginResourcePolicy: { policy: "cross-origin" }, // permite imágenes de Cloudinary
-  contentSecurityPolicy: false, // desactivado porque el frontend lo maneja Netlify
+  crossOriginResourcePolicy: { policy: "cross-origin" },
+  contentSecurityPolicy: false,
 }));
 
 const allowedOrigins = [
@@ -53,6 +56,6 @@ app.use("/public",    publicRoutes);
 app.use("/productos", productosRoutes);
 app.use("/admin",     adminRoutes);
 app.use("/barberos",  barberosRoutes);
-app.use("/barbero",   barberoRoutes); 
+app.use("/barbero",   barberoRoutes);
 
 module.exports = app;

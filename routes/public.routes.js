@@ -1,6 +1,7 @@
-const express = require("express");
-const router  = express.Router();
-const db      = require("../config/db");
+const express    = require("express");
+const router     = express.Router();
+const db         = require("../config/db");
+const rateLimit  = require("express-rate-limit");
 
 const { validarDatosCitaPublica, sanitizar, sanitizarFacebook } = require("../validators/citas.validator");
 const { verificarToken, verificarTokenOpcional } = require("../middlewares/auth.middleware");
@@ -11,6 +12,34 @@ const esFechaValida    = (v) => /^\d{4}-\d{2}-\d{2}$/.test(v) && !isNaN(Date.par
 function minutosBloqueo(duracionMin) {
   return Math.ceil(duracionMin / 60) * 60;
 }
+
+// ── Rate limiter para agendar citas públicas ──────────────────────
+// Máx 5 citas por IP cada 24 horas — evita spam de citas falsas
+const citasLimiter = rateLimit({
+  windowMs: 24 * 60 * 60 * 1000, // 24 horas
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => {
+    // IP real aunque haya proxy (Render/Netlify)
+    return req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || req.ip || "unknown";
+  },
+  skip: (req) => {
+    // Dueños de barbería y barberos autenticados no tienen límite
+    try {
+      const auth = req.headers["authorization"];
+      if (!auth) return false;
+      const jwt = require("jsonwebtoken");
+      const payload = jwt.verify(auth.replace("Bearer ", ""), process.env.JWT_SECRET);
+      return payload.tipo === "barberia" || payload.tipo === "barbero";
+    } catch (_) { return false; }
+  },
+  handler: (_req, res) => {
+    res.status(429).json({
+      error: "Has alcanzado el límite de 5 citas por día. Intenta mañana o contacta directamente a la barbería."
+    });
+  }
+});
 
 // ─────────────────────────────────────────────────────────────────
 // GET /public/barberia/:id
@@ -145,7 +174,7 @@ router.get("/disponibilidad/:id_barberia", async (req, res) => {
 // ─────────────────────────────────────────────────────────────────
 // POST /public/citas  — con transacción para atomicidad
 // ─────────────────────────────────────────────────────────────────
-router.post("/citas", verificarTokenOpcional, async (req, res) => {
+router.post("/citas", citasLimiter, verificarTokenOpcional, async (req, res) => {
   const {
     id_barberia, id_servicio, fechaInicio,
     nombre, primerAp, telefono, usuarioFacebook,
@@ -170,12 +199,10 @@ router.post("/citas", verificarTokenOpcional, async (req, res) => {
       return res.status(400).json({ error: erroresValidacion[0], detalles: erroresValidacion });
   }
 
-  // ── Usar transacción para que cita + detalle_cita sean atómicos ──
   const conn = await db.getConnection();
   try {
     await conn.beginTransaction();
 
-    // ── Resolver id_cliente ──────────────────────────────────────
     let id_cliente = esAdmin ? id_cliente_param : null;
 
     if (!esAdmin) {
@@ -203,7 +230,6 @@ router.post("/citas", verificarTokenOpcional, async (req, res) => {
       return res.status(400).json({ error: "Cliente no especificado o inválido" });
     }
 
-    // ── Verificar servicio ───────────────────────────────────────
     const [servicios] = await conn.query(
       "SELECT precio, hora_estimada FROM servicios WHERE id = ? AND id_barberia = ?",
       [id_servicio, id_barberia]
@@ -218,7 +244,6 @@ router.post("/citas", verificarTokenOpcional, async (req, res) => {
     const bloqueoMin = minutosBloqueo(hora_estimada);
     const fin        = new Date(inicio.getTime() + bloqueoMin * 60000);
 
-    // ── Determinar id_barbero ────────────────────────────────────
     let id_barbero = null;
 
     const [barberosActivos] = await conn.query(
@@ -286,13 +311,11 @@ router.post("/citas", verificarTokenOpcional, async (req, res) => {
       }
     }
 
-    // ── Crear la cita ────────────────────────────────────────────
     const [cita] = await conn.query(
       "INSERT INTO citas (fechaInicio, fechaFin, id_barberia, id_cliente, id_barbero, estado, precio) VALUES (?,?,?,?,?,'pendiente',?)",
       [inicio, fin, id_barberia, id_cliente, id_barbero, precio]
     );
 
-    // ── Crear detalle (mismo commit) ─────────────────────────────
     await conn.query(
       "INSERT INTO detalle_citas (id_cita, id_servicio, cantidad, precio_unitario, precio_total) VALUES (?,?,1,?,?)",
       [cita.insertId, id_servicio, precio, precio]
