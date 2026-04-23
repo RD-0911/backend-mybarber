@@ -2,6 +2,7 @@ const express   = require("express");
 const bcrypt    = require("bcryptjs");
 const jwt       = require("jsonwebtoken");
 const rateLimit = require("express-rate-limit");
+const { OAuth2Client } = require("google-auth-library");
 const router    = express.Router();
 
 const db = require("../config/db");
@@ -9,6 +10,9 @@ const { validarBarberia, validarEmail, validarPassword } = require("../validator
 const { generarCodigo, enviarCorreoRecuperacion }        = require("../services/email.service");
 const { guardarCodigo, obtenerCodigo, marcarVerificado,
         eliminarCodigo, codigoEstaExpirado }             = require("../services/auth.service");
+
+// ── Google OAuth ──────────────────────────────────────────────────
+const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
 // ── Rate limiters ─────────────────────────────────────────────────
 const loginLimiter = rateLimit({
@@ -25,6 +29,12 @@ const loginLimiter = rateLimit({
   }
 });
 
+const googleLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, max: 10,
+  standardHeaders: true, legacyHeaders: false,
+  message: { error: "Demasiados intentos. Espera unos minutos." }
+});
+
 const forgotLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, max: 3,
   keyGenerator: (req) => `forgot:${req.body?.correo?.trim().toLowerCase() || "unknown"}`,
@@ -35,8 +45,17 @@ function generarToken(payload, expira = "8h") {
   return jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: expira });
 }
 
+// Token temporal para completar registro (solo 15 min, solo para este paso)
+function generarTokenRegistro(googleData) {
+  return jwt.sign(
+    { google_id: googleData.sub, correo: googleData.email, nombre: googleData.name, scope: "complete_register" },
+    process.env.JWT_SECRET,
+    { expiresIn: "15m" }
+  );
+}
+
 // ─────────────────────────────────────────────────────────────────
-// POST /auth/register
+// POST /auth/register  (existente, sin cambios)
 // ─────────────────────────────────────────────────────────────────
 router.post("/register", async (req, res) => {
   const errores = validarBarberia(req.body);
@@ -55,8 +74,8 @@ router.post("/register", async (req, res) => {
 
     const passwordHash = await bcrypt.hash(password, 14);
     const [result] = await db.query(
-      `INSERT INTO barberia (nombre, direccion, nombre_encargado, telefono, correo, password)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO barberia (nombre, direccion, nombre_encargado, telefono, correo, password, auth_provider)
+       VALUES (?, ?, ?, ?, ?, ?, 'local')`,
       [nombre.trim(), direccion.trim(), nombre_encargado.trim(),
        telefono.trim(), correoNorm, passwordHash]
     );
@@ -68,7 +87,7 @@ router.post("/register", async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────
-// POST /auth/login — detecta si es barbería o barbero
+// POST /auth/login — detecta si es barbería o barbero (igual que antes)
 // ─────────────────────────────────────────────────────────────────
 router.post("/login", loginLimiter, async (req, res) => {
   const { correo, password } = req.body;
@@ -82,22 +101,29 @@ router.post("/login", loginLimiter, async (req, res) => {
   const correoNorm = correo.trim().toLowerCase();
 
   try {
-    // ── 1. Buscar en tabla barberia ───────────────────────────────
     const [resBarberia] = await db.query(
       `SELECT id, nombre, direccion, nombre_encargado, telefono,
-              correo, idSuscripcion, foto_perfil, password
+              correo, idSuscripcion, foto_perfil, password, auth_provider
        FROM barberia WHERE correo = ?`,
       [correoNorm]
     );
 
     if (resBarberia.length > 0) {
       const barberia = resBarberia[0];
-      const valida   = await bcrypt.compare(password, barberia.password);
+
+      // Si la cuenta es solo de Google (sin contraseña local)
+      if (!barberia.password) {
+        return res.status(401).json({
+          error: "Esta cuenta usa Google. Inicia sesión con Google o añade una contraseña desde tu perfil."
+        });
+      }
+
+      const valida = await bcrypt.compare(password, barberia.password);
       if (!valida)
         return res.status(401).json({ error: "Correo o contraseña incorrectos" });
 
       const token = generarToken({ id: barberia.id, correo: barberia.correo, tipo: "barberia" });
-      const { password: _, ...barberiaSegura } = barberia;
+      const { password: _, auth_provider: __, ...barberiaSegura } = barberia;
       return res.json({
         message: "Login exitoso",
         tipo: "barberia",
@@ -106,7 +132,6 @@ router.post("/login", loginLimiter, async (req, res) => {
       });
     }
 
-    // ── 2. Buscar en tabla barberos ───────────────────────────────
     const [resBarbero] = await db.query(
       `SELECT id, id_barberia, nombre, correo, foto, activo, password
        FROM barberos WHERE correo = ?`,
@@ -139,7 +164,6 @@ router.post("/login", loginLimiter, async (req, res) => {
       });
     }
 
-    // ── 3. No encontrado en ninguna tabla ─────────────────────────
     return res.status(401).json({ error: "Correo o contraseña incorrectos" });
 
   } catch (error) {
@@ -148,8 +172,207 @@ router.post("/login", loginLimiter, async (req, res) => {
   }
 });
 
+// ═══════════════════════════════════════════════════════════════
+// POST /auth/google — login / registro con Google
+// ═══════════════════════════════════════════════════════════════
+router.post("/google", googleLimiter, async (req, res) => {
+  const { credential } = req.body;
+  if (!credential) return res.status(400).json({ error: "Token de Google requerido" });
+
+  try {
+    // Verificar el token con Google
+    const ticket = await googleClient.verifyIdToken({
+      idToken: credential,
+      audience: process.env.GOOGLE_CLIENT_ID,
+    });
+    const payload = ticket.getPayload();
+
+    // Google valida automáticamente aud, iss, exp
+    if (!payload.email_verified)
+      return res.status(400).json({ error: "Tu correo de Google no está verificado" });
+
+    const googleId = payload.sub;
+    const correoNorm = payload.email.trim().toLowerCase();
+    const nombreGoogle = payload.name || "";
+
+    // 1. Buscar en barberia por google_id o correo
+    const [resBarberia] = await db.query(
+      `SELECT id, nombre, direccion, nombre_encargado, telefono,
+              correo, idSuscripcion, foto_perfil, google_id, password
+       FROM barberia WHERE google_id = ? OR correo = ?`,
+      [googleId, correoNorm]
+    );
+
+    if (resBarberia.length > 0) {
+      const barberia = resBarberia[0];
+
+      // Si tiene cuenta con correo pero nunca se vinculó con Google, vincular ahora
+      if (!barberia.google_id) {
+        await db.query(
+          "UPDATE barberia SET google_id = ? WHERE id = ?",
+          [googleId, barberia.id]
+        );
+      }
+
+      const token = generarToken({ id: barberia.id, correo: barberia.correo, tipo: "barberia" });
+      const { password, google_id, ...barberiaSegura } = barberia;
+      return res.json({
+        message: "Login exitoso con Google",
+        tipo: "barberia",
+        token,
+        barberia: barberiaSegura,
+        tieneContrasena: !!password, // para mostrar aviso de "añade contraseña" si no tiene
+      });
+    }
+
+    // 2. Buscar en barberos
+    const [resBarbero] = await db.query(
+      `SELECT id, id_barberia, nombre, correo, foto, activo, google_id
+       FROM barberos WHERE google_id = ? OR correo = ?`,
+      [googleId, correoNorm]
+    );
+
+    if (resBarbero.length > 0) {
+      const barbero = resBarbero[0];
+
+      if (!barbero.activo)
+        return res.status(403).json({ error: "Tu cuenta está desactivada. Contacta al dueño del negocio." });
+
+      if (!barbero.google_id) {
+        await db.query(
+          "UPDATE barberos SET google_id = ? WHERE id = ?",
+          [googleId, barbero.id]
+        );
+      }
+
+      const token = generarToken({
+        id:          barbero.id,
+        id_barberia: barbero.id_barberia,
+        correo:      barbero.correo,
+        tipo:        "barbero",
+      });
+      const { google_id, ...barberoSeguro } = barbero;
+      return res.json({
+        message: "Login exitoso con Google",
+        tipo: "barbero",
+        token,
+        barbero: barberoSeguro,
+      });
+    }
+
+    // 3. No existe — emitir token temporal de registro
+    const tokenRegistro = generarTokenRegistro(payload);
+    return res.status(200).json({
+      needsRegistration: true,
+      registroToken: tokenRegistro,
+      prefill: {
+        correo: correoNorm,
+        nombre_encargado: nombreGoogle,
+      },
+    });
+
+  } catch (e) {
+    console.error("Error POST /auth/google:", e.message);
+    return res.status(401).json({ error: "Token de Google inválido o expirado" });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════
+// POST /auth/google/complete-register — completar datos de barbería
+// ═══════════════════════════════════════════════════════════════
+router.post("/google/complete-register", async (req, res) => {
+  const { registroToken, nombre, direccion, nombre_encargado, telefono } = req.body;
+
+  if (!registroToken)
+    return res.status(400).json({ error: "Token de registro requerido" });
+
+  // Validar el token de registro
+  let googleData;
+  try {
+    googleData = jwt.verify(registroToken, process.env.JWT_SECRET);
+    if (googleData.scope !== "complete_register")
+      return res.status(401).json({ error: "Token inválido" });
+  } catch (_) {
+    return res.status(401).json({ error: "Tu sesión de registro expiró. Vuelve a iniciar con Google." });
+  }
+
+  // Validar campos obligatorios
+  if (!nombre?.trim() || !direccion?.trim() || !nombre_encargado?.trim() || !telefono?.trim())
+    return res.status(400).json({ error: "Todos los campos son obligatorios" });
+
+  if (!/^\d{10}$/.test(telefono.trim()))
+    return res.status(400).json({ error: "El teléfono debe tener exactamente 10 dígitos" });
+
+  try {
+    // Verificar que el correo no se haya registrado en el lapso de los 15 minutos
+    const [existe] = await db.query(
+      "SELECT id FROM barberia WHERE correo = ? OR google_id = ?",
+      [googleData.correo, googleData.google_id]
+    );
+    if (existe.length > 0)
+      return res.status(409).json({ error: "Este correo ya tiene una cuenta registrada" });
+
+    const [result] = await db.query(
+      `INSERT INTO barberia
+       (nombre, direccion, nombre_encargado, telefono, correo, google_id, auth_provider, password)
+       VALUES (?, ?, ?, ?, ?, ?, 'google', NULL)`,
+      [nombre.trim(), direccion.trim(), nombre_encargado.trim(),
+       telefono.trim(), googleData.correo, googleData.google_id]
+    );
+
+    const token = generarToken({
+      id: result.insertId,
+      correo: googleData.correo,
+      tipo: "barberia"
+    });
+
+    const [nuevaBarberia] = await db.query(
+      "SELECT id, nombre, direccion, nombre_encargado, telefono, correo, idSuscripcion, foto_perfil FROM barberia WHERE id = ?",
+      [result.insertId]
+    );
+
+    res.status(201).json({
+      message: "Cuenta creada exitosamente",
+      tipo: "barberia",
+      token,
+      barberia: nuevaBarberia[0],
+      tieneContrasena: false,
+    });
+  } catch (e) {
+    console.error("Error complete-register:", e.message);
+    res.status(500).json({ error: "Error al crear la cuenta" });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════
+// POST /auth/add-password — añadir contraseña a cuenta de Google
+// ═══════════════════════════════════════════════════════════════
+const { verificarToken } = require("../middlewares/auth.middleware");
+
+router.post("/add-password", verificarToken, async (req, res) => {
+  const { nueva } = req.body;
+  if (!nueva) return res.status(400).json({ error: "Contraseña requerida" });
+  if (!validarPassword(nueva))
+    return res.status(400).json({ error: "La contraseña debe tener mínimo 8 caracteres con letras y números" });
+
+  try {
+    const [rows] = await db.query("SELECT password FROM barberia WHERE id = ?", [req.barberia.id]);
+    if (!rows.length) return res.status(404).json({ error: "Cuenta no encontrada" });
+
+    if (rows[0].password)
+      return res.status(400).json({ error: "Ya tienes una contraseña. Usa 'cambiar contraseña' en su lugar." });
+
+    const hash = await bcrypt.hash(nueva, 14);
+    await db.query("UPDATE barberia SET password = ? WHERE id = ?", [hash, req.barberia.id]);
+    res.json({ message: "Contraseña añadida correctamente. Ahora puedes iniciar sesión con correo y contraseña." });
+  } catch (e) {
+    console.error("Error add-password:", e);
+    res.status(500).json({ error: "Error al añadir contraseña" });
+  }
+});
+
 // ─────────────────────────────────────────────────────────────────
-// POST /auth/forgot-password
+// POST /auth/forgot-password (sin cambios)
 // ─────────────────────────────────────────────────────────────────
 router.post("/forgot-password", forgotLimiter, async (req, res) => {
   const { correo } = req.body;
@@ -160,10 +383,16 @@ router.post("/forgot-password", forgotLimiter, async (req, res) => {
 
   try {
     const [results] = await db.query(
-      "SELECT id FROM barberia WHERE correo = ?", [correoNorm]
+      "SELECT id, password FROM barberia WHERE correo = ?", [correoNorm]
     );
     if (results.length === 0)
       return res.status(200).json({ message: "Si el correo está registrado, recibirás un código" });
+
+    // Si la cuenta es solo Google sin contraseña, no permitir recuperación
+    if (!results[0].password)
+      return res.status(400).json({
+        error: "Esta cuenta usa Google. Inicia sesión con Google en lugar de recuperar contraseña."
+      });
 
     const codigo = generarCodigo();
     await guardarCodigo(correoNorm, codigo);
@@ -177,7 +406,7 @@ router.post("/forgot-password", forgotLimiter, async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────
-// POST /auth/verify-code
+// POST /auth/verify-code (sin cambios)
 // ─────────────────────────────────────────────────────────────────
 router.post("/verify-code", async (req, res) => {
   const { correo, codigo } = req.body;
@@ -204,7 +433,7 @@ router.post("/verify-code", async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────
-// POST /auth/reset-password
+// POST /auth/reset-password (sin cambios)
 // ─────────────────────────────────────────────────────────────────
 router.post("/reset-password", async (req, res) => {
   const { correo, codigo, nuevaPassword } = req.body;
