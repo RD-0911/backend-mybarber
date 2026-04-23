@@ -179,6 +179,12 @@ router.post("/google", googleLimiter, async (req, res) => {
   const { credential } = req.body;
   if (!credential) return res.status(400).json({ error: "Token de Google requerido" });
 
+    // DEBUG — quitar después
+  console.log("=== DEBUG Google Login ===");
+  console.log("GOOGLE_CLIENT_ID cargado:", JSON.stringify(process.env.GOOGLE_CLIENT_ID));
+  console.log("Credential primeros 80 chars:", credential?.slice(0, 80));
+
+
   try {
     // Verificar el token con Google
     const ticket = await googleClient.verifyIdToken({
@@ -270,9 +276,9 @@ router.post("/google", googleLimiter, async (req, res) => {
         nombre_encargado: nombreGoogle,
       },
     });
-
+    //depues qcambiar  a e.message
   } catch (e) {
-    console.error("Error POST /auth/google:", e.message);
+    console.error("Error POST /auth/google:", e);
     return res.status(401).json({ error: "Token de Google inválido o expirado" });
   }
 });
