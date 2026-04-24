@@ -146,7 +146,6 @@ router.get("/disponibilidad/:id_barberia", async (req, res) => {
     let bloqueos = [];
 
     if (id_barbero && esEnteroPositivo(id_barbero)) {
-      // Citas del barbero específico
       [citas] = await db.query(
         `SELECT c.fechaInicio, c.fechaFin, s.hora_estimada
          FROM citas c
@@ -159,17 +158,17 @@ router.get("/disponibilidad/:id_barberia", async (req, res) => {
          ORDER BY c.fechaInicio ASC`,
         [req.params.id_barberia, id_barbero, fecha]
       );
-
-      // Bloqueos del barbero específico
+      // Usar comparación por timestamp para evitar overflow de zona horaria
+      // El día (fecha) va de 00:00:00 a 23:59:59 en hora local del servidor
       [bloqueos] = await db.query(
         `SELECT fecha_inicio AS fechaInicio, fecha_fin AS fechaFin
          FROM bloqueos_barbero
          WHERE id_barbero = ?
-           AND DATE(fecha_inicio) <= ? AND DATE(fecha_fin) >= ?`,
+           AND fecha_inicio < CONCAT(?, ' 23:59:59')
+           AND fecha_fin    > CONCAT(?, ' 00:00:00')`,
         [id_barbero, fecha, fecha]
       );
     } else {
-      // Sin barbero: citas y bloqueos de todos los barberos de la barbería
       [citas] = await db.query(
         `SELECT c.fechaInicio, c.fechaFin, s.hora_estimada
          FROM citas c
@@ -181,18 +180,18 @@ router.get("/disponibilidad/:id_barberia", async (req, res) => {
          ORDER BY c.fechaInicio ASC`,
         [req.params.id_barberia, fecha]
       );
-
       [bloqueos] = await db.query(
         `SELECT bb.fecha_inicio AS fechaInicio, bb.fecha_fin AS fechaFin
          FROM bloqueos_barbero bb
          INNER JOIN barberos b ON b.id = bb.id_barbero
          WHERE b.id_barberia = ?
-           AND DATE(bb.fecha_inicio) <= ? AND DATE(bb.fecha_fin) >= ?`,
+           AND bb.fecha_inicio < CONCAT(?, ' 23:59:59')
+           AND bb.fecha_fin    > CONCAT(?, ' 00:00:00')`,
         [req.params.id_barberia, fecha, fecha]
       );
     }
 
-    // Combinar: el frontend trata bloqueos y citas igual (horarios ocupados)
+    // Combinar citas + bloqueos para que el frontend los trate igual (ocupados)
     const ocupados = [
       ...citas,
       ...bloqueos.map(b => ({ fechaInicio: b.fechaInicio, fechaFin: b.fechaFin, hora_estimada: null }))
@@ -291,22 +290,45 @@ router.post("/citas", citasLimiter, verificarTokenOpcional, async (req, res) => 
         );
         if (!bVerif.length)
           return res.status(400).json({ error: "El barbero seleccionado no está disponible" });
+
+        // Verificar que no tenga bloqueo en ese horario
+        const [bloqueosBarbero] = await db.query(
+          `SELECT id FROM bloqueos_barbero
+           WHERE id_barbero = ?
+             AND fecha_inicio < ? AND fecha_fin > ?`,
+          [id_barbero_param, fin, inicio]
+        );
+        if (bloqueosBarbero.length > 0)
+          return res.status(409).json({ error: "Este barbero tiene bloqueado ese horario. Por favor elige otro." });
+
         id_barbero = id_barbero_param;
       } else {
-        // "Sin preferencia" → asignar el primer barbero libre en ese horario
-        for (const b of barberosActivos) {
-          const [conf] = await db.query(
-            `SELECT id FROM citas
-             WHERE id_barbero = ?
-               AND estado NOT IN ('cancelada')
-               AND fechaFin IS NOT NULL
-               AND fechaInicio < ? AND fechaFin > ?`,
-            [b.id, fin.toISOString(), inicio.toISOString()]
-          );
-          if (conf.length === 0) { id_barbero = b.id; break; }
-        }
-        if (!id_barbero)
+        // "Sin preferencia" — 1 sola query para citas + 1 para bloqueos (sin N+1)
+        const bIds = barberosActivos.map(b => b.id);
+        const placeholders = bIds.map(() => "?").join(",");
+
+        const [ocupadosCitas] = await db.query(
+          `SELECT DISTINCT id_barbero FROM citas
+           WHERE id_barbero IN (${placeholders})
+             AND estado NOT IN ('cancelada')
+             AND fechaFin IS NOT NULL
+             AND fechaInicio < ? AND fechaFin > ?`,
+          [...bIds, fin.toISOString(), inicio.toISOString()]
+        );
+        const [ocupadosBloq] = await db.query(
+          `SELECT DISTINCT id_barbero FROM bloqueos_barbero
+           WHERE id_barbero IN (${placeholders})
+             AND fecha_inicio < ? AND fecha_fin > ?`,
+          [...bIds, fin, inicio]
+        );
+        const indispSet = new Set([
+          ...ocupadosCitas.map(r => r.id_barbero),
+          ...ocupadosBloq.map(r => r.id_barbero),
+        ]);
+        const libre = barberosActivos.find(b => !indispSet.has(b.id));
+        if (!libre)
           return res.status(409).json({ error: "No hay barberos disponibles en este horario. Por favor elige otra hora." });
+        id_barbero = libre.id;
       }
 
       // Verificar conflicto para ese barbero específico
