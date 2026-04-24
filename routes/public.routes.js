@@ -1,17 +1,10 @@
 const express    = require("express");
 const router     = express.Router();
 const db         = require("../config/db");
-const rateLimit  = require("express-rate-limit");
+const { rateLimit, ipKeyGenerator } = require("express-rate-limit");
 
 const { validarDatosCitaPublica, sanitizar, sanitizarFacebook } = require("../validators/citas.validator");
 const { verificarToken, verificarTokenOpcional } = require("../middlewares/auth.middleware");
-
-const esEnteroPositivo = (v) => Number.isInteger(Number(v)) && Number(v) > 0;
-const esFechaValida    = (v) => /^\d{4}-\d{2}-\d{2}$/.test(v) && !isNaN(Date.parse(v));
-
-function minutosBloqueo(duracionMin) {
-  return Math.ceil(duracionMin / 60) * 60;
-}
 
 // ── Rate limiter para agendar citas públicas ──────────────────────
 // Máx 5 citas por IP cada 24 horas — evita spam de citas falsas
@@ -21,25 +14,32 @@ const citasLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: (req) => {
-    // IP real aunque haya proxy (Render/Netlify)
-    return req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || req.ip || "unknown";
+    // ipKeyGenerator maneja IPv4 e IPv6 correctamente (requerido por express-rate-limit v7+)
+    return ipKeyGenerator(req.ip)
   },
   skip: (req) => {
-    // Dueños de barbería y barberos autenticados no tienen límite
+    // Los admins autenticados (dueños de barbería) no tienen límite
     try {
-      const auth = req.headers["authorization"];
-      if (!auth) return false;
-      const jwt = require("jsonwebtoken");
-      const payload = jwt.verify(auth.replace("Bearer ", ""), process.env.JWT_SECRET);
-      return payload.tipo === "barberia" || payload.tipo === "barbero";
-    } catch (_) { return false; }
+      const auth = req.headers["authorization"]
+      if (!auth) return false
+      const jwt = require("jsonwebtoken")
+      const payload = jwt.verify(auth.replace("Bearer ", ""), process.env.JWT_SECRET)
+      return payload.tipo === "barberia" || payload.tipo === "barbero"
+    } catch (_) { return false }
   },
   handler: (_req, res) => {
     res.status(429).json({
       error: "Has alcanzado el límite de 5 citas por día. Intenta mañana o contacta directamente a la barbería."
-    });
+    })
   }
 });
+
+const esEnteroPositivo = (v) => Number.isInteger(Number(v)) && Number(v) > 0;
+const esFechaValida    = (v) => /^\d{4}-\d{2}-\d{2}$/.test(v) && !isNaN(Date.parse(v));
+
+function minutosBloqueo(duracionMin) {
+  return Math.ceil(duracionMin / 60) * 60;
+}
 
 // ─────────────────────────────────────────────────────────────────
 // GET /public/barberia/:id
@@ -83,7 +83,7 @@ router.get("/servicios/:id_barberia", async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────
-// GET /public/barberos/:id_barberia
+// GET /public/barberos/:id_barberia — barberos activos para reserva pública
 // ─────────────────────────────────────────────────────────────────
 router.get("/barberos/:id_barberia", async (req, res) => {
   if (!esEnteroPositivo(req.params.id_barberia))
@@ -130,7 +130,9 @@ router.get("/citas-barberia/:id_barberia", verificarToken, async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────
-// GET /public/disponibilidad/:id_barberia
+// GET /public/disponibilidad/:id_barberia?fecha=YYYY-MM-DD&id_barbero=X
+// Si se pasa id_barbero → disponibilidad solo de ese barbero
+// Si no → disponibilidad global (sin barberos registrados)
 // ─────────────────────────────────────────────────────────────────
 router.get("/disponibilidad/:id_barberia", async (req, res) => {
   if (!esEnteroPositivo(req.params.id_barberia))
@@ -142,6 +144,7 @@ router.get("/disponibilidad/:id_barberia", async (req, res) => {
   try {
     let rows;
     if (id_barbero && esEnteroPositivo(id_barbero)) {
+      // Disponibilidad por barbero específico
       [rows] = await db.query(
         `SELECT c.fechaInicio, c.fechaFin, s.hora_estimada
          FROM citas c
@@ -155,6 +158,7 @@ router.get("/disponibilidad/:id_barberia", async (req, res) => {
         [req.params.id_barberia, id_barbero, fecha]
       );
     } else {
+      // Disponibilidad global (sin barberos)
       [rows] = await db.query(
         `SELECT c.fechaInicio, c.fechaFin, s.hora_estimada
          FROM citas c
@@ -172,7 +176,7 @@ router.get("/disponibilidad/:id_barberia", async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────
-// POST /public/citas  — con transacción para atomicidad
+// POST /public/citas
 // ─────────────────────────────────────────────────────────────────
 router.post("/citas", citasLimiter, verificarTokenOpcional, async (req, res) => {
   const {
@@ -199,91 +203,85 @@ router.post("/citas", citasLimiter, verificarTokenOpcional, async (req, res) => 
       return res.status(400).json({ error: erroresValidacion[0], detalles: erroresValidacion });
   }
 
-  const conn = await db.getConnection();
   try {
-    await conn.beginTransaction();
-
     let id_cliente = esAdmin ? id_cliente_param : null;
 
     if (!esAdmin) {
-      const [existe] = await conn.query(
+      const [existe] = await db.query(
         "SELECT id FROM clientes WHERE telefono = ?", [telefono.trim()]
       );
       if (existe.length > 0) {
         id_cliente = existe[0].id;
       } else {
-        const [nuevo] = await conn.query(
+        const [nuevo] = await db.query(
           "INSERT INTO clientes (nombre, primerAp, telefono, usuarioFacebook) VALUES (?,?,?,?)",
           [sanitizar(nombre), sanitizar(primerAp), telefono.trim(),
            usuarioFacebook ? sanitizarFacebook(usuarioFacebook) : null]
         );
         id_cliente = nuevo.insertId;
       }
-      await conn.query(
-        "INSERT IGNORE INTO cliente_barberia (id_cliente, id_barberia) VALUES (?,?)",
-        [id_cliente, id_barberia]
-      ).catch(() => {});
+      try {
+        await db.query(
+          "INSERT IGNORE INTO cliente_barberia (id_cliente, id_barberia) VALUES (?,?)",
+          [id_cliente, id_barberia]
+        );
+      } catch (_) {}
     }
 
-    if (!id_cliente || !esEnteroPositivo(id_cliente)) {
-      await conn.rollback();
+    if (!id_cliente || !esEnteroPositivo(id_cliente))
       return res.status(400).json({ error: "Cliente no especificado o inválido" });
-    }
 
-    const [servicios] = await conn.query(
+    // Verificar servicio
+    const [servicios] = await db.query(
       "SELECT precio, hora_estimada FROM servicios WHERE id = ? AND id_barberia = ?",
       [id_servicio, id_barberia]
     );
-    if (!servicios.length) {
-      await conn.rollback();
+    if (!servicios.length)
       return res.status(400).json({ error: "Servicio no válido para esta barbería" });
-    }
 
     const { precio, hora_estimada } = servicios[0];
     const inicio     = inicioDate;
     const bloqueoMin = minutosBloqueo(hora_estimada);
     const fin        = new Date(inicio.getTime() + bloqueoMin * 60000);
 
+    // ── Determinar id_barbero ────────────────────────────────────
     let id_barbero = null;
 
-    const [barberosActivos] = await conn.query(
+    // Verificar si hay barberos activos en la barbería
+    const [barberosActivos] = await db.query(
       "SELECT id FROM barberos WHERE id_barberia = ? AND activo = 1", [id_barberia]
     );
     const hayBarberos = barberosActivos.length > 0;
 
     if (hayBarberos) {
       if (id_barbero_param && esEnteroPositivo(id_barbero_param)) {
-        const [bVerif] = await conn.query(
+        // Cliente eligió barbero específico — verificar que pertenece a esta barbería
+        const [bVerif] = await db.query(
           "SELECT id FROM barberos WHERE id = ? AND id_barberia = ? AND activo = 1",
           [id_barbero_param, id_barberia]
         );
-        if (!bVerif.length) {
-          await conn.rollback();
+        if (!bVerif.length)
           return res.status(400).json({ error: "El barbero seleccionado no está disponible" });
-        }
         id_barbero = id_barbero_param;
       } else {
-        // 1 sola query en vez de N queries — obtiene IDs de barberos sin conflicto
-        const bIds = barberosActivos.map(b => b.id);
-        const placeholders = bIds.map(() => "?").join(",");
-        const [ocupados] = await conn.query(
-          `SELECT DISTINCT id_barbero FROM citas
-           WHERE id_barbero IN (${placeholders})
-             AND estado NOT IN ('cancelada')
-             AND fechaFin IS NOT NULL
-             AND fechaInicio < ? AND fechaFin > ?`,
-          [...bIds, fin.toISOString(), inicio.toISOString()]
-        );
-        const ocupadosSet = new Set(ocupados.map(r => r.id_barbero));
-        const libre = barberosActivos.find(b => !ocupadosSet.has(b.id));
-        if (!libre) {
-          await conn.rollback();
-          return res.status(409).json({ error: "No hay barberos disponibles en este horario. Por favor elige otra hora." });
+        // "Sin preferencia" → asignar el primer barbero libre en ese horario
+        for (const b of barberosActivos) {
+          const [conf] = await db.query(
+            `SELECT id FROM citas
+             WHERE id_barbero = ?
+               AND estado NOT IN ('cancelada')
+               AND fechaFin IS NOT NULL
+               AND fechaInicio < ? AND fechaFin > ?`,
+            [b.id, fin.toISOString(), inicio.toISOString()]
+          );
+          if (conf.length === 0) { id_barbero = b.id; break; }
         }
-        id_barbero = libre.id;
+        if (!id_barbero)
+          return res.status(409).json({ error: "No hay barberos disponibles en este horario. Por favor elige otra hora." });
       }
 
-      const [conflictos] = await conn.query(
+      // Verificar conflicto para ese barbero específico
+      const [conflictos] = await db.query(
         `SELECT id FROM citas
          WHERE id_barbero = ?
            AND estado NOT IN ('cancelada')
@@ -291,13 +289,12 @@ router.post("/citas", citasLimiter, verificarTokenOpcional, async (req, res) => 
            AND fechaInicio < ? AND fechaFin > ?`,
         [id_barbero, fin.toISOString(), inicio.toISOString()]
       );
-      if (conflictos.length > 0) {
-        await conn.rollback();
+      if (conflictos.length > 0)
         return res.status(409).json({ error: "Este barbero ya tiene una cita en ese horario. Por favor elige otro." });
-      }
 
     } else {
-      const [conflictos] = await conn.query(
+      // Sin barberos — verificar conflicto global
+      const [conflictos] = await db.query(
         `SELECT id FROM citas
          WHERE id_barberia = ?
            AND estado NOT IN ('cancelada')
@@ -305,31 +302,26 @@ router.post("/citas", citasLimiter, verificarTokenOpcional, async (req, res) => 
            AND fechaInicio < ? AND fechaFin > ?`,
         [id_barberia, fin.toISOString(), inicio.toISOString()]
       );
-      if (conflictos.length > 0) {
-        await conn.rollback();
+      if (conflictos.length > 0)
         return res.status(409).json({ error: "Este horario ya está ocupado. Por favor elige otro." });
-      }
     }
 
-    const [cita] = await conn.query(
+    // ── Crear la cita ────────────────────────────────────────────
+    const [cita] = await db.query(
       "INSERT INTO citas (fechaInicio, fechaFin, id_barberia, id_cliente, id_barbero, estado, precio) VALUES (?,?,?,?,?,'pendiente',?)",
       [inicio, fin, id_barberia, id_cliente, id_barbero, precio]
     );
 
-    await conn.query(
+    await db.query(
       "INSERT INTO detalle_citas (id_cita, id_servicio, cantidad, precio_unitario, precio_total) VALUES (?,?,1,?,?)",
       [cita.insertId, id_servicio, precio, precio]
     );
 
-    await conn.commit();
     res.status(201).json({ message: "¡Cita creada exitosamente!", id_cita: cita.insertId });
 
   } catch (e) {
-    await conn.rollback();
     console.error("Error POST /public/citas:", e.message);
     res.status(500).json({ error: "Error al crear la cita. Intenta de nuevo." });
-  } finally {
-    conn.release();
   }
 });
 
