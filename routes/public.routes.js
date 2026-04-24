@@ -142,10 +142,12 @@ router.get("/disponibilidad/:id_barberia", async (req, res) => {
   if (!esFechaValida(fecha)) return res.status(400).json({ error: "Formato de fecha inválido" });
 
   try {
-    let rows;
+    let citas;
+    let bloqueos = [];
+
     if (id_barbero && esEnteroPositivo(id_barbero)) {
-      // Disponibilidad por barbero específico
-      [rows] = await db.query(
+      // Citas del barbero específico
+      [citas] = await db.query(
         `SELECT c.fechaInicio, c.fechaFin, s.hora_estimada
          FROM citas c
          LEFT JOIN detalle_citas dc ON dc.id_cita = c.id
@@ -157,9 +159,18 @@ router.get("/disponibilidad/:id_barberia", async (req, res) => {
          ORDER BY c.fechaInicio ASC`,
         [req.params.id_barberia, id_barbero, fecha]
       );
+
+      // Bloqueos del barbero específico
+      [bloqueos] = await db.query(
+        `SELECT fecha_inicio AS fechaInicio, fecha_fin AS fechaFin
+         FROM bloqueos_barbero
+         WHERE id_barbero = ?
+           AND DATE(fecha_inicio) <= ? AND DATE(fecha_fin) >= ?`,
+        [id_barbero, fecha, fecha]
+      );
     } else {
-      // Disponibilidad global (sin barberos)
-      [rows] = await db.query(
+      // Sin barbero: citas y bloqueos de todos los barberos de la barbería
+      [citas] = await db.query(
         `SELECT c.fechaInicio, c.fechaFin, s.hora_estimada
          FROM citas c
          LEFT JOIN detalle_citas dc ON dc.id_cita = c.id
@@ -170,9 +181,27 @@ router.get("/disponibilidad/:id_barberia", async (req, res) => {
          ORDER BY c.fechaInicio ASC`,
         [req.params.id_barberia, fecha]
       );
+
+      [bloqueos] = await db.query(
+        `SELECT bb.fecha_inicio AS fechaInicio, bb.fecha_fin AS fechaFin
+         FROM bloqueos_barbero bb
+         INNER JOIN barberos b ON b.id = bb.id_barbero
+         WHERE b.id_barberia = ?
+           AND DATE(bb.fecha_inicio) <= ? AND DATE(bb.fecha_fin) >= ?`,
+        [req.params.id_barberia, fecha, fecha]
+      );
     }
-    res.json(rows);
-  } catch (_) { res.status(500).json({ error: "Error del servidor" }); }
+
+    // Combinar: el frontend trata bloqueos y citas igual (horarios ocupados)
+    const ocupados = [
+      ...citas,
+      ...bloqueos.map(b => ({ fechaInicio: b.fechaInicio, fechaFin: b.fechaFin, hora_estimada: null }))
+    ];
+    res.json(ocupados);
+  } catch (e) {
+    console.error("Error GET /disponibilidad:", e);
+    res.status(500).json({ error: "Error del servidor" });
+  }
 });
 
 // ─────────────────────────────────────────────────────────────────

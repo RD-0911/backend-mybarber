@@ -274,4 +274,121 @@ router.post("/citas", verificarBarbero, async (req, res) => {
   }
 });
 
+// ═══════════════════════════════════════════════════════════════
+// BLOQUEOS DE AGENDA
+// ═══════════════════════════════════════════════════════════════
+
+// GET /barbero/bloqueos — listar mis bloqueos futuros y activos
+router.get("/bloqueos", verificarBarbero, async (req, res) => {
+  try {
+    const [rows] = await db.query(
+      `SELECT id, fecha_inicio, fecha_fin, motivo, created_at
+       FROM bloqueos_barbero
+       WHERE id_barbero = ?
+         AND fecha_fin >= NOW()
+       ORDER BY fecha_inicio ASC`,
+      [req.barbero.id]
+    );
+    res.json(rows);
+  } catch (e) {
+    console.error("Error GET /barbero/bloqueos:", e);
+    res.status(500).json({ error: "Error al obtener bloqueos" });
+  }
+});
+
+// POST /barbero/bloqueos — crear un bloqueo
+// Body: { fecha_inicio: "2025-05-10T09:00", fecha_fin: "2025-05-10T17:00", motivo: "..." }
+// Query ?forzar=true para cancelar citas en conflicto automáticamente
+router.post("/bloqueos", verificarBarbero, async (req, res) => {
+  const { fecha_inicio, fecha_fin, motivo } = req.body;
+  const forzar = req.query.forzar === "true";
+
+  if (!fecha_inicio || !fecha_fin)
+    return res.status(400).json({ error: "Fechas requeridas" });
+
+  const inicio = new Date(fecha_inicio);
+  const fin    = new Date(fecha_fin);
+
+  if (isNaN(inicio.getTime()) || isNaN(fin.getTime()))
+    return res.status(400).json({ error: "Fechas inválidas" });
+  if (fin <= inicio)
+    return res.status(400).json({ error: "La fecha de fin debe ser posterior al inicio" });
+  if (inicio < new Date(Date.now() - 60000)) // tolerancia de 1 min
+    return res.status(400).json({ error: "No puedes bloquear fechas pasadas" });
+  if (motivo && motivo.length > 100)
+    return res.status(400).json({ error: "El motivo no puede exceder 100 caracteres" });
+
+  const conn = await db.getConnection();
+  try {
+    await conn.beginTransaction();
+
+    // Buscar citas en conflicto (no canceladas)
+    const [citasConflicto] = await conn.query(
+      `SELECT id, fechaInicio FROM citas
+       WHERE id_barbero = ?
+         AND estado NOT IN ('cancelada')
+         AND fechaInicio < ? AND fechaFin > ?`,
+      [req.barbero.id, fin, inicio]
+    );
+
+    // Si hay citas y no pidió forzar, devolver info para que confirme
+    if (citasConflicto.length > 0 && !forzar) {
+      await conn.rollback();
+      return res.status(409).json({
+        error: "Hay citas en ese rango",
+        citasEnConflicto: citasConflicto.length,
+        requiereConfirmacion: true,
+      });
+    }
+
+    // Si forzó, cancelar las citas en conflicto
+    if (citasConflicto.length > 0 && forzar) {
+      await conn.query(
+        `UPDATE citas SET estado = 'cancelada'
+         WHERE id_barbero = ?
+           AND estado NOT IN ('cancelada')
+           AND fechaInicio < ? AND fechaFin > ?`,
+        [req.barbero.id, fin, inicio]
+      );
+    }
+
+    // Crear el bloqueo
+    const [result] = await conn.query(
+      `INSERT INTO bloqueos_barbero (id_barbero, fecha_inicio, fecha_fin, motivo)
+       VALUES (?, ?, ?, ?)`,
+      [req.barbero.id, inicio, fin, motivo?.trim() || null]
+    );
+
+    await conn.commit();
+    res.status(201).json({
+      message: "Bloqueo creado",
+      id: result.insertId,
+      citasCanceladas: citasConflicto.length,
+    });
+  } catch (e) {
+    await conn.rollback();
+    console.error("Error POST /barbero/bloqueos:", e);
+    res.status(500).json({ error: "Error al crear bloqueo" });
+  } finally {
+    conn.release();
+  }
+});
+
+// DELETE /barbero/bloqueos/:id — eliminar un bloqueo
+router.delete("/bloqueos/:id", verificarBarbero, async (req, res) => {
+  try {
+    const [result] = await db.query(
+      "DELETE FROM bloqueos_barbero WHERE id = ? AND id_barbero = ?",
+      [req.params.id, req.barbero.id]
+    );
+    if (result.affectedRows === 0)
+      return res.status(404).json({ error: "Bloqueo no encontrado" });
+    res.json({ message: "Bloqueo eliminado" });
+  } catch (e) {
+    console.error("Error DELETE /barbero/bloqueos:", e);
+    res.status(500).json({ error: "Error del servidor" });
+  }
+});
+
+
 module.exports = router;
