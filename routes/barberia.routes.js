@@ -41,9 +41,36 @@ function esOwner(req, res) {
   return true;
 }
 
-// ─────────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════
+// RUTAS SIN :id — DEBEN IR ANTES DE LAS RUTAS CON /:id
+// (si no, Express interpreta "bloqueos" como un :id)
+// ═══════════════════════════════════════════════════════════════
+
+// GET /barberia/bloqueos — todos los bloqueos activos/futuros de la barbería
+router.get("/bloqueos", verificarToken, async (req, res) => {
+  try {
+    const [rows] = await db.query(
+      `SELECT bb.id, bb.id_barbero, bb.fecha_inicio, bb.fecha_fin, bb.motivo, bb.created_at,
+              b.nombre AS barbero_nombre, b.foto AS barbero_foto
+       FROM bloqueos_barbero bb
+       INNER JOIN barberos b ON b.id = bb.id_barbero
+       WHERE b.id_barberia = ?
+         AND bb.fecha_fin >= NOW()
+       ORDER BY bb.fecha_inicio ASC`,
+      [req.barberia.id]
+    );
+    res.json(rows);
+  } catch (e) {
+    console.error("Error GET /barberia/bloqueos:", e);
+    res.status(500).json({ error: "Error al obtener bloqueos" });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════
+// RUTAS CON :id
+// ═══════════════════════════════════════════════════════════════
+
 // GET /barberia/:id  — público
-// ─────────────────────────────────────────────────────────────────
 router.get("/:id", async (req, res) => {
   try {
     const [results] = await db.query(
@@ -84,9 +111,7 @@ router.delete("/:id/foto", verificarToken, async (req, res) => {
   }
 });
 
-// ─────────────────────────────────────────────────────────────────
-// GET /barberia/:id/servicios  — público, incluye tipo y contenido
-// ─────────────────────────────────────────────────────────────────
+// GET /barberia/:id/servicios  — público
 router.get("/:id/servicios", async (req, res) => {
   try {
     let rows;
@@ -99,7 +124,6 @@ router.get("/:id/servicios", async (req, res) => {
         [req.params.id]
       );
     } catch (_) {
-      // Fallback si las columnas tipo/contenido aún no existen
       [rows] = await db.query(
         `SELECT id, descripcion, 'servicio' AS tipo, '' AS contenido,
                 precio, hora_estimada, IFNULL(activo,1) AS activo
@@ -128,7 +152,6 @@ router.post("/:id/servicios", verificarToken, async (req, res) => {
         [req.params.id, descripcion.trim(), tipoValido, contenido?.trim() || null, parseFloat(precio), parseInt(hora_estimada)]
       );
     } catch (_) {
-      // Fallback sin tipo/contenido si las columnas no existen
       [result] = await db.query(
         "INSERT INTO servicios (id_barberia, descripcion, precio, hora_estimada, activo) VALUES (?,?,?,?,1)",
         [req.params.id, descripcion.trim(), parseFloat(precio), parseInt(hora_estimada)]
@@ -300,30 +323,5 @@ router.put("/:id/password", verificarToken, async (req, res) => {
     res.status(500).json({ error: "Error al cambiar contraseña" });
   }
 });
-
-// ═══════════════════════════════════════════════════════════════
-// BLOQUEOS (vista del dueño — todos los barberos de su barbería)
-// ═══════════════════════════════════════════════════════════════
-
-// GET /barberia/bloqueos — lista todos los bloqueos activos/futuros de la barbería
-router.get("/bloqueos", verificarToken, async (req, res) => {
-  try {
-    const [rows] = await db.query(
-      `SELECT bb.id, bb.id_barbero, bb.fecha_inicio, bb.fecha_fin, bb.motivo, bb.created_at,
-              b.nombre AS barbero_nombre, b.foto AS barbero_foto
-       FROM bloqueos_barbero bb
-       INNER JOIN barberos b ON b.id = bb.id_barbero
-       WHERE b.id_barberia = ?
-         AND bb.fecha_fin >= NOW()
-       ORDER BY bb.fecha_inicio ASC`,
-      [req.barberia.id]
-    );
-    res.json(rows);
-  } catch (e) {
-    console.error("Error GET /barberia/bloqueos:", e);
-    res.status(500).json({ error: "Error al obtener bloqueos" });
-  }
-});
-
 
 module.exports = router;
