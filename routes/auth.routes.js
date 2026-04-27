@@ -274,6 +274,69 @@ router.post("/google", googleLimiter, async (req, res) => {
   }
 });
 
+
+// ═══════════════════════════════════════════════════════════════
+// POST /auth/google-token — login con access_token (móvil/useGoogleLogin)
+// ═══════════════════════════════════════════════════════════════
+router.post("/google-token", googleLimiter, async (req, res) => {
+  const { userInfo } = req.body;
+  if (!userInfo || !userInfo.sub || !userInfo.email)
+    return res.status(400).json({ error: "Información de Google inválida" });
+
+  if (!userInfo.email_verified)
+    return res.status(400).json({ error: "Tu correo de Google no está verificado" });
+
+  try {
+    const googleId    = userInfo.sub;
+    const correoNorm  = userInfo.email.trim().toLowerCase();
+    const nombreGoogle = userInfo.name || "";
+
+    const [resBarberia] = await db.query(
+      `SELECT id, nombre, direccion, nombre_encargado, telefono,
+              correo, idSuscripcion, foto_perfil, google_id, password
+       FROM barberia WHERE google_id = ? OR correo = ?`,
+      [googleId, correoNorm]
+    );
+
+    if (resBarberia.length > 0) {
+      const barberia = resBarberia[0];
+      if (!barberia.google_id)
+        await db.query("UPDATE barberia SET google_id = ? WHERE id = ?", [googleId, barberia.id]);
+      const token = generarToken({ id: barberia.id, correo: barberia.correo, tipo: "barberia" });
+      const { password, google_id, ...barberiaSegura } = barberia;
+      return res.json({ message: "Login exitoso con Google", tipo: "barberia", token, barberia: barberiaSegura, tieneContrasena: !!password });
+    }
+
+    const [resBarbero] = await db.query(
+      `SELECT id, id_barberia, nombre, correo, foto, activo, google_id
+       FROM barberos WHERE google_id = ? OR correo = ?`,
+      [googleId, correoNorm]
+    );
+
+    if (resBarbero.length > 0) {
+      const barbero = resBarbero[0];
+      if (!barbero.activo)
+        return res.status(403).json({ error: "Tu cuenta está desactivada. Contacta al dueño del negocio." });
+      if (!barbero.google_id)
+        await db.query("UPDATE barberos SET google_id = ? WHERE id = ?", [googleId, barbero.id]);
+      const token = generarToken({ id: barbero.id, id_barberia: barbero.id_barberia, correo: barbero.correo, tipo: "barbero" });
+      const { google_id, ...barberoSeguro } = barbero;
+      return res.json({ message: "Login exitoso con Google", tipo: "barbero", token, barbero: barberoSeguro });
+    }
+
+    const tokenRegistro = generarTokenRegistro({ sub: googleId, email: correoNorm, name: nombreGoogle });
+    return res.status(200).json({
+      needsRegistration: true,
+      registroToken: tokenRegistro,
+      prefill: { correo: correoNorm, nombre_encargado: nombreGoogle },
+    });
+
+  } catch (e) {
+    console.error("Error POST /auth/google-token:", e.message);
+    return res.status(500).json({ error: "Error interno del servidor" });
+  }
+});
+
 // ═══════════════════════════════════════════════════════════════
 // POST /auth/google/complete-register
 // ═══════════════════════════════════════════════════════════════
