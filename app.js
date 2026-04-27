@@ -20,8 +20,8 @@ app.set("trust proxy", 1);
 // Seguridad: headers HTTP seguros automáticos
 app.use(helmet({
   crossOriginResourcePolicy: { policy: "cross-origin" },
-  // Google OAuth necesita permitir postMessage entre ventanas
-  crossOriginOpenerPolicy: { policy: "same-origin-allow-popups" },
+  crossOriginOpenerPolicy: false,
+  crossOriginEmbedderPolicy: false,
   contentSecurityPolicy: false,
 }));
 
