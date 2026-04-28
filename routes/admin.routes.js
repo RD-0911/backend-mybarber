@@ -1,5 +1,5 @@
-const express    = require("express");
-const bcrypt     = require("bcryptjs");
+const express     = require("express");
+const transporter = require("../config/mailer");
 const jwt        = require("jsonwebtoken");
 const rateLimit  = require("express-rate-limit");
 const router     = express.Router();
@@ -26,28 +26,78 @@ const adminLoginLimiter = rateLimit({
   }
 });
 
-// ── POST /admin/login ─────────────────────────────────────────────
+// ── Almacén temporal de códigos OTP (en memoria) ─────────────────
+// { correo: { codigo, expira } }
+const otpStore = new Map();
+
+// ── POST /admin/request-code — solicitar código por correo ────────
+router.post("/request-code", adminLoginLimiter, async (req, res) => {
+  const { correo } = req.body;
+  const adminEmail = process.env.ADMIN_EMAIL;
+
+  if (!correo)
+    return res.status(400).json({ error: "Correo requerido" });
+
+  // Siempre responder igual para no revelar si el correo es válido
+  if (correo.trim().toLowerCase() !== adminEmail?.toLowerCase())
+    return res.json({ message: "Si el correo es correcto, recibirás un código" });
+
+  // Generar código de 6 dígitos, expira en 5 minutos
+  const codigo = Math.floor(100000 + Math.random() * 900000).toString();
+  const expira = Date.now() + 5 * 60 * 1000;
+  otpStore.set(adminEmail.toLowerCase(), { codigo, expira });
+
+  try {
+    await transporter.sendMail({
+      from: '"MyBarber Admin 🔐" <mybarber564@gmail.com>',
+      to: adminEmail,
+      subject: "Código de acceso - Panel Admin MyBarber",
+      html: `
+        <div style="font-family:'Segoe UI',sans-serif;max-width:480px;margin:0 auto;background:#0d0d0d;border-radius:16px;overflow:hidden;border:1px solid #2a0050;">
+          <div style="background:linear-gradient(135deg,#1a0030,#4a0080);padding:32px;text-align:center;">
+            <h1 style="color:#fff;font-size:24px;margin:0;letter-spacing:2px;">✂ MyBarber</h1>
+            <p style="color:rgba(255,255,255,0.7);margin:8px 0 0;font-size:13px;">Panel de Administración</p>
+          </div>
+          <div style="padding:32px;">
+            <p style="color:#ccc;font-size:15px;margin:0 0 8px;">Tu código de acceso es:</p>
+            <div style="background:#1a0030;border-radius:12px;padding:28px;text-align:center;margin:20px 0;border:2px solid #7b00ff;">
+              <div style="font-size:48px;font-weight:900;letter-spacing:14px;color:#c060ff;font-family:monospace;">${codigo}</div>
+            </div>
+            <p style="color:#888;font-size:13px;">⏱ Expira en <strong style="color:#c060ff;">5 minutos</strong>.</p>
+            <p style="color:#888;font-size:13px;">🔒 Si no solicitaste este acceso, ignora este correo.</p>
+            <p style="color:#555;font-size:12px;margin-top:24px;border-top:1px solid #222;padding-top:16px;">Este código es de un solo uso y expira automáticamente.</p>
+          </div>
+        </div>
+      `,
+    });
+  } catch (e) {
+    console.error("Error enviando código admin:", e.message);
+    return res.status(500).json({ error: "Error al enviar el código. Intenta de nuevo." });
+  }
+
+  res.json({ message: "Si el correo es correcto, recibirás un código" });
+});
+
+// ── POST /admin/login — verificar código OTP ──────────────────────
 router.post("/login", adminLoginLimiter, async (req, res) => {
-  const { correo, password } = req.body;
-  if (!correo || !password)
-    return res.status(400).json({ error: "Correo y contraseña requeridos" });
+  const { correo, codigo } = req.body;
+  const adminEmail = process.env.ADMIN_EMAIL;
 
-  const adminEmail    = process.env.ADMIN_EMAIL;
-  const adminPassword = process.env.ADMIN_PASSWORD;
+  if (!correo || !codigo)
+    return res.status(400).json({ error: "Correo y código requeridos" });
 
-  if (!adminEmail || !adminPassword)
-    return res.status(500).json({ error: "Panel admin no configurado" });
+  if (correo.trim().toLowerCase() !== adminEmail?.toLowerCase())
+    return res.status(401).json({ error: "Código inválido o expirado" });
 
-  if (correo.trim().toLowerCase() !== adminEmail.toLowerCase())
-    return res.status(401).json({ error: "Credenciales incorrectas" });
+  const otp = otpStore.get(adminEmail.toLowerCase());
 
-  // Solo bcrypt — sin fallback de texto plano
-  // Si ADMIN_PASSWORD aún no está hasheada, cámbiala con:
-  //   node -e "const b=require('bcryptjs');b.hash('tuPassword',14).then(console.log)"
-  const valida = await bcrypt.compare(password, adminPassword).catch(() => false);
+  if (!otp || otp.codigo !== codigo.trim() || Date.now() > otp.expira) {
+    otpStore.delete(adminEmail.toLowerCase());
+    return res.status(401).json({ error: "Código inválido o expirado" });
+  }
 
-  if (!valida)
-    return res.status(401).json({ error: "Credenciales incorrectas" });
+  // Código correcto — eliminar para que sea de un solo uso
+  otpStore.delete(adminEmail.toLowerCase());
 
   const token = jwt.sign(
     { role: "admin", correo: adminEmail },
