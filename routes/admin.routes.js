@@ -56,7 +56,7 @@ router.post("/request-code", adminLoginLimiter, async (req, res) => {
 
   try {
     await transporter.sendMail({
-      from: '"MyBarber Admin 🔐" <mybarber564@11019850.brevosend.com>',
+      from: '"MyBarber Admin 🔐" <mybarber564@gmail.com>',
       to: adminEmail,
       subject: "Código de verificación - Panel Admin MyBarber",
       html: `
