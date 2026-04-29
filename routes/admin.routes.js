@@ -5,6 +5,7 @@ const rateLimit  = require("express-rate-limit");
 const router     = express.Router();
 const db         = require("../config/db");
 const { verificarAdmin } = require("../middlewares/adminAuth.middleware");
+const { guardarRefreshToken, revocarRefreshToken } = require("../services/auth.service");
 
 // ── Rate limiter: máx 5 intentos de login admin cada 15 min ──────
 const adminLoginLimiter = rateLimit({
@@ -108,10 +109,14 @@ router.post("/login", adminLoginLimiter, async (req, res) => {
   const token = jwt.sign(
     { role: "admin", correo: adminEmail },
     process.env.JWT_SECRET,
-    { expiresIn: "8h" }
+    { expiresIn: "1h" }
   );
 
-  res.json({ token, admin: { correo: adminEmail, nombre: "Administrador" } });
+  const crypto = require("crypto");
+  const refreshToken = crypto.randomBytes(32).toString("hex");
+  await guardarRefreshToken(refreshToken, 0, "admin").catch(() => {});
+
+  res.json({ token, refreshToken, admin: { correo: adminEmail, nombre: "Administrador" } });
 });
 
 // ── GET /admin/stats ──────────────────────────────────────────────
@@ -245,6 +250,15 @@ router.delete("/barberias/:id", verificarAdmin, async (req, res) => {
   } catch (e) {
     res.status(500).json({ error: "Error al eliminar" });
   }
+});
+
+// ── POST /admin/logout — revocar refresh token del admin ──────────
+router.post("/logout", async (req, res) => {
+  const { refreshToken } = req.body;
+  if (refreshToken) {
+    try { await revocarRefreshToken(refreshToken); } catch (_) {}
+  }
+  res.json({ message: "Sesión cerrada correctamente" });
 });
 
 module.exports = router;

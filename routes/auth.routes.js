@@ -1,6 +1,7 @@
 const express   = require("express");
 const bcrypt    = require("bcryptjs");
 const jwt       = require("jsonwebtoken");
+const crypto    = require("crypto");
 const rateLimit = require("express-rate-limit");
 const { OAuth2Client } = require("google-auth-library");
 const router    = express.Router();
@@ -8,11 +9,13 @@ const router    = express.Router();
 const db = require("../config/db");
 const { validarBarberia, validarEmail, validarPassword } = require("../validators/barberia.validator");
 const { generarCodigo, enviarCorreoRecuperacion }        = require("../services/email.service");
-const { guardarCodigo, obtenerCodigo, marcarVerificado,
-        eliminarCodigo, codigoEstaExpirado }             = require("../services/auth.service");
+const {
+  guardarCodigo, obtenerCodigo, marcarVerificado,
+  eliminarCodigo, codigoEstaExpirado,
+  guardarRefreshToken, obtenerRefreshToken, revocarRefreshToken,
+} = require("../services/auth.service");
 
 // ── Google OAuth ──────────────────────────────────────────────────
-// .trim() blinda contra espacios/saltos de línea accidentales en la variable de entorno
 const GOOGLE_CLIENT_ID = (process.env.GOOGLE_CLIENT_ID || "").trim();
 const googleClient = new OAuth2Client(GOOGLE_CLIENT_ID);
 
@@ -43,7 +46,9 @@ const forgotLimiter = rateLimit({
   message: { error: "Demasiadas solicitudes de recuperación. Espera una hora." }
 });
 
-function generarToken(payload, expira = "8h") {
+// ── Helpers de tokens ─────────────────────────────────────────────
+
+function generarToken(payload, expira = "1h") {
   return jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: expira });
 }
 
@@ -53,6 +58,12 @@ function generarTokenRegistro(googleData) {
     process.env.JWT_SECRET,
     { expiresIn: "15m" }
   );
+}
+
+async function generarRefreshToken(userId, userType) {
+  const token = crypto.randomBytes(32).toString("hex");
+  await guardarRefreshToken(token, userId, userType);
+  return token;
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -122,12 +133,14 @@ router.post("/login", loginLimiter, async (req, res) => {
       if (!valida)
         return res.status(401).json({ error: "Correo o contraseña incorrectos" });
 
-      const token = generarToken({ id: barberia.id, correo: barberia.correo, tipo: "barberia" });
+      const token        = generarToken({ id: barberia.id, correo: barberia.correo, tipo: "barberia" });
+      const refreshToken = await generarRefreshToken(barberia.id, "barberia");
       const { password: _, auth_provider: __, ...barberiaSegura } = barberia;
       return res.json({
         message: "Login exitoso",
         tipo: "barberia",
         token,
+        refreshToken,
         barberia: barberiaSegura
       });
     }
@@ -154,12 +167,13 @@ router.post("/login", loginLimiter, async (req, res) => {
         correo:      barbero.correo,
         tipo:        "barbero"
       });
-
+      const refreshToken = await generarRefreshToken(barbero.id, "barbero");
       const { password: _, ...barberoSeguro } = barbero;
       return res.json({
         message: "Login exitoso",
         tipo: "barbero",
         token,
+        refreshToken,
         barbero: barberoSeguro
       });
     }
@@ -173,7 +187,7 @@ router.post("/login", loginLimiter, async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════
-// POST /auth/google — login / registro con Google
+// POST /auth/google — login / registro con Google (credential)
 // ═══════════════════════════════════════════════════════════════
 router.post("/google", googleLimiter, async (req, res) => {
   const { credential } = req.body;
@@ -189,107 +203,9 @@ router.post("/google", googleLimiter, async (req, res) => {
     if (!payload.email_verified)
       return res.status(400).json({ error: "Tu correo de Google no está verificado" });
 
-    const googleId = payload.sub;
+    const googleId   = payload.sub;
     const correoNorm = payload.email.trim().toLowerCase();
     const nombreGoogle = payload.name || "";
-
-    // 1. Buscar en barberia por google_id o correo
-    const [resBarberia] = await db.query(
-      `SELECT id, nombre, direccion, nombre_encargado, telefono,
-              correo, idSuscripcion, foto_perfil, google_id, password
-       FROM barberia WHERE google_id = ? OR correo = ?`,
-      [googleId, correoNorm]
-    );
-
-    if (resBarberia.length > 0) {
-      const barberia = resBarberia[0];
-
-      if (!barberia.google_id) {
-        await db.query(
-          "UPDATE barberia SET google_id = ? WHERE id = ?",
-          [googleId, barberia.id]
-        );
-      }
-
-      const token = generarToken({ id: barberia.id, correo: barberia.correo, tipo: "barberia" });
-      const { password, google_id, ...barberiaSegura } = barberia;
-      return res.json({
-        message: "Login exitoso con Google",
-        tipo: "barberia",
-        token,
-        barberia: barberiaSegura,
-        tieneContrasena: !!password,
-      });
-    }
-
-    // 2. Buscar en barberos
-    const [resBarbero] = await db.query(
-      `SELECT id, id_barberia, nombre, correo, foto, activo, google_id
-       FROM barberos WHERE google_id = ? OR correo = ?`,
-      [googleId, correoNorm]
-    );
-
-    if (resBarbero.length > 0) {
-      const barbero = resBarbero[0];
-
-      if (!barbero.activo)
-        return res.status(403).json({ error: "Tu cuenta está desactivada. Contacta al dueño del negocio." });
-
-      if (!barbero.google_id) {
-        await db.query(
-          "UPDATE barberos SET google_id = ? WHERE id = ?",
-          [googleId, barbero.id]
-        );
-      }
-
-      const token = generarToken({
-        id:          barbero.id,
-        id_barberia: barbero.id_barberia,
-        correo:      barbero.correo,
-        tipo:        "barbero",
-      });
-      const { google_id, ...barberoSeguro } = barbero;
-      return res.json({
-        message: "Login exitoso con Google",
-        tipo: "barbero",
-        token,
-        barbero: barberoSeguro,
-      });
-    }
-
-    // 3. No existe — emitir token temporal de registro
-    const tokenRegistro = generarTokenRegistro(payload);
-    return res.status(200).json({
-      needsRegistration: true,
-      registroToken: tokenRegistro,
-      prefill: {
-        correo: correoNorm,
-        nombre_encargado: nombreGoogle,
-      },
-    });
-
-  } catch (e) {
-    console.error("Error POST /auth/google:", e.message);
-    return res.status(401).json({ error: "Token de Google inválido o expirado" });
-  }
-});
-
-
-// ═══════════════════════════════════════════════════════════════
-// POST /auth/google-token — login con access_token (móvil/useGoogleLogin)
-// ═══════════════════════════════════════════════════════════════
-router.post("/google-token", googleLimiter, async (req, res) => {
-  const { userInfo } = req.body;
-  if (!userInfo || !userInfo.sub || !userInfo.email)
-    return res.status(400).json({ error: "Información de Google inválida" });
-
-  if (!userInfo.email_verified)
-    return res.status(400).json({ error: "Tu correo de Google no está verificado" });
-
-  try {
-    const googleId    = userInfo.sub;
-    const correoNorm  = userInfo.email.trim().toLowerCase();
-    const nombreGoogle = userInfo.name || "";
 
     const [resBarberia] = await db.query(
       `SELECT id, nombre, direccion, nombre_encargado, telefono,
@@ -302,9 +218,18 @@ router.post("/google-token", googleLimiter, async (req, res) => {
       const barberia = resBarberia[0];
       if (!barberia.google_id)
         await db.query("UPDATE barberia SET google_id = ? WHERE id = ?", [googleId, barberia.id]);
-      const token = generarToken({ id: barberia.id, correo: barberia.correo, tipo: "barberia" });
+
+      const token        = generarToken({ id: barberia.id, correo: barberia.correo, tipo: "barberia" });
+      const refreshToken = await generarRefreshToken(barberia.id, "barberia");
       const { password, google_id, ...barberiaSegura } = barberia;
-      return res.json({ message: "Login exitoso con Google", tipo: "barberia", token, barberia: barberiaSegura, tieneContrasena: !!password });
+      return res.json({
+        message: "Login exitoso con Google",
+        tipo: "barberia",
+        token,
+        refreshToken,
+        barberia: barberiaSegura,
+        tieneContrasena: !!password,
+      });
     }
 
     const [resBarbero] = await db.query(
@@ -319,9 +244,103 @@ router.post("/google-token", googleLimiter, async (req, res) => {
         return res.status(403).json({ error: "Tu cuenta está desactivada. Contacta al dueño del negocio." });
       if (!barbero.google_id)
         await db.query("UPDATE barberos SET google_id = ? WHERE id = ?", [googleId, barbero.id]);
-      const token = generarToken({ id: barbero.id, id_barberia: barbero.id_barberia, correo: barbero.correo, tipo: "barbero" });
+
+      const token = generarToken({
+        id:          barbero.id,
+        id_barberia: barbero.id_barberia,
+        correo:      barbero.correo,
+        tipo:        "barbero",
+      });
+      const refreshToken = await generarRefreshToken(barbero.id, "barbero");
       const { google_id, ...barberoSeguro } = barbero;
-      return res.json({ message: "Login exitoso con Google", tipo: "barbero", token, barbero: barberoSeguro });
+      return res.json({
+        message: "Login exitoso con Google",
+        tipo: "barbero",
+        token,
+        refreshToken,
+        barbero: barberoSeguro,
+      });
+    }
+
+    // No existe — token temporal de registro
+    const tokenRegistro = generarTokenRegistro(payload);
+    return res.status(200).json({
+      needsRegistration: true,
+      registroToken: tokenRegistro,
+      prefill: { correo: correoNorm, nombre_encargado: nombreGoogle },
+    });
+
+  } catch (e) {
+    console.error("Error POST /auth/google:", e.message);
+    return res.status(401).json({ error: "Token de Google inválido o expirado" });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════
+// POST /auth/google-token — login con access_token (useGoogleLogin)
+// ═══════════════════════════════════════════════════════════════
+router.post("/google-token", googleLimiter, async (req, res) => {
+  const { userInfo } = req.body;
+  if (!userInfo || !userInfo.sub || !userInfo.email)
+    return res.status(400).json({ error: "Información de Google inválida" });
+
+  if (!userInfo.email_verified)
+    return res.status(400).json({ error: "Tu correo de Google no está verificado" });
+
+  try {
+    const googleId     = userInfo.sub;
+    const correoNorm   = userInfo.email.trim().toLowerCase();
+    const nombreGoogle = userInfo.name || "";
+
+    const [resBarberia] = await db.query(
+      `SELECT id, nombre, direccion, nombre_encargado, telefono,
+              correo, idSuscripcion, foto_perfil, google_id, password
+       FROM barberia WHERE google_id = ? OR correo = ?`,
+      [googleId, correoNorm]
+    );
+
+    if (resBarberia.length > 0) {
+      const barberia = resBarberia[0];
+      if (!barberia.google_id)
+        await db.query("UPDATE barberia SET google_id = ? WHERE id = ?", [googleId, barberia.id]);
+      const token        = generarToken({ id: barberia.id, correo: barberia.correo, tipo: "barberia" });
+      const refreshToken = await generarRefreshToken(barberia.id, "barberia");
+      const { password, google_id, ...barberiaSegura } = barberia;
+      return res.json({
+        message: "Login exitoso con Google",
+        tipo: "barberia",
+        token,
+        refreshToken,
+        barberia: barberiaSegura,
+        tieneContrasena: !!password,
+      });
+    }
+
+    const [resBarbero] = await db.query(
+      `SELECT id, id_barberia, nombre, correo, foto, activo, google_id
+       FROM barberos WHERE google_id = ? OR correo = ?`,
+      [googleId, correoNorm]
+    );
+
+    if (resBarbero.length > 0) {
+      const barbero = resBarbero[0];
+      if (!barbero.activo)
+        return res.status(403).json({ error: "Tu cuenta está desactivada. Contacta al dueño del negocio." });
+      if (!barbero.google_id)
+        await db.query("UPDATE barberos SET google_id = ? WHERE id = ?", [googleId, barbero.id]);
+      const token = generarToken({
+        id: barbero.id, id_barberia: barbero.id_barberia,
+        correo: barbero.correo, tipo: "barbero",
+      });
+      const refreshToken = await generarRefreshToken(barbero.id, "barbero");
+      const { google_id, ...barberoSeguro } = barbero;
+      return res.json({
+        message: "Login exitoso con Google",
+        tipo: "barbero",
+        token,
+        refreshToken,
+        barbero: barberoSeguro,
+      });
     }
 
     const tokenRegistro = generarTokenRegistro({ sub: googleId, email: correoNorm, name: nombreGoogle });
@@ -377,11 +396,8 @@ router.post("/google/complete-register", async (req, res) => {
        telefono.trim(), googleData.correo, googleData.google_id]
     );
 
-    const token = generarToken({
-      id: result.insertId,
-      correo: googleData.correo,
-      tipo: "barberia"
-    });
+    const token        = generarToken({ id: result.insertId, correo: googleData.correo, tipo: "barberia" });
+    const refreshToken = await generarRefreshToken(result.insertId, "barberia");
 
     const [nuevaBarberia] = await db.query(
       "SELECT id, nombre, direccion, nombre_encargado, telefono, correo, idSuscripcion, foto_perfil FROM barberia WHERE id = ?",
@@ -392,6 +408,7 @@ router.post("/google/complete-register", async (req, res) => {
       message: "Cuenta creada exitosamente",
       tipo: "barberia",
       token,
+      refreshToken,
       barberia: nuevaBarberia[0],
       tieneContrasena: false,
     });
@@ -524,6 +541,75 @@ router.post("/reset-password", async (req, res) => {
     console.error("Error en /reset-password:", error);
     res.status(500).json({ error: "Error interno del servidor" });
   }
+});
+
+// ═══════════════════════════════════════════════════════════════
+// POST /auth/refresh — emitir nuevo access token con refresh token
+// ═══════════════════════════════════════════════════════════════
+router.post("/refresh", async (req, res) => {
+  const { refreshToken } = req.body;
+  if (!refreshToken)
+    return res.status(400).json({ error: "Refresh token requerido" });
+
+  try {
+    const registro = await obtenerRefreshToken(refreshToken);
+    if (!registro)
+      return res.status(401).json({ error: "Sesión expirada. Inicia sesión de nuevo." });
+
+    let userData, tokenPayload;
+
+    if (registro.user_type === "barberia") {
+      const [rows] = await db.query(
+        `SELECT id, nombre, direccion, nombre_encargado, telefono,
+                correo, idSuscripcion, foto_perfil
+         FROM barberia WHERE id = ?`,
+        [registro.user_id]
+      );
+      if (!rows.length) {
+        await revocarRefreshToken(refreshToken);
+        return res.status(401).json({ error: "Cuenta no encontrada" });
+      }
+      userData     = rows[0];
+      tokenPayload = { id: userData.id, correo: userData.correo, tipo: "barberia" };
+
+    } else if (registro.user_type === "barbero") {
+      const [rows] = await db.query(
+        "SELECT id, id_barberia, nombre, correo, foto, activo FROM barberos WHERE id = ?",
+        [registro.user_id]
+      );
+      if (!rows.length || !rows[0].activo) {
+        await revocarRefreshToken(refreshToken);
+        return res.status(401).json({ error: "Barbero no encontrado o desactivado" });
+      }
+      userData     = rows[0];
+      tokenPayload = { id: userData.id, id_barberia: userData.id_barberia, correo: userData.correo, tipo: "barbero" };
+
+    } else if (registro.user_type === "admin") {
+      userData     = { correo: process.env.ADMIN_EMAIL, nombre: "Administrador" };
+      tokenPayload = { role: "admin", correo: process.env.ADMIN_EMAIL };
+
+    } else {
+      return res.status(401).json({ error: "Tipo de sesión inválido" });
+    }
+
+    const accessToken = generarToken(tokenPayload);
+    res.json({ accessToken, user: userData, tipo: registro.user_type });
+
+  } catch (e) {
+    console.error("Error POST /auth/refresh:", e);
+    res.status(500).json({ error: "Error interno del servidor" });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════
+// POST /auth/logout — revocar refresh token
+// ═══════════════════════════════════════════════════════════════
+router.post("/logout", async (req, res) => {
+  const { refreshToken } = req.body;
+  if (refreshToken) {
+    try { await revocarRefreshToken(refreshToken); } catch (_) {}
+  }
+  res.json({ message: "Sesión cerrada correctamente" });
 });
 
 module.exports = router;
