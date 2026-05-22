@@ -7,10 +7,10 @@ const { validarDatosCitaPublica, sanitizar, sanitizarFacebook } = require("../va
 const { verificarToken, verificarTokenOpcional } = require("../middlewares/auth.middleware");
 
 // ── Rate limiter para agendar citas públicas ──────────────────────
-// Máx 5 citas por IP cada 24 horas — evita spam de citas falsas
+// Máx 3 citas por IP cada 24 horas — evita spam de citas falsas
 const citasLimiter = rateLimit({
   windowMs: 24 * 60 * 60 * 1000, // 24 horas
-  max: 5,
+  max: 3,
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: (req) => {
@@ -29,7 +29,7 @@ const citasLimiter = rateLimit({
   },
   handler: (_req, res) => {
     res.status(429).json({
-      error: "Has alcanzado el límite de 5 citas por día. Intenta mañana o contacta directamente a la barbería."
+      error: "Has alcanzado el límite de 3 citas por día. Intenta mañana o contacta directamente a la barbería."
     })
   }
 });
