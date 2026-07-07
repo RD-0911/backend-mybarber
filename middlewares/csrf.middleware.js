@@ -39,14 +39,16 @@ function emitirCsrfToken(req, res) {
 function validarCsrf(req, res, next) {
   if (!UNSAFE_METHODS.includes(req.method)) return next();
 
-  // Rutas excluidas (OAuth callbacks y refresh no necesitan CSRF)
+  // Rutas excluidas (OAuth callbacks, refresh y login de admin no necesitan CSRF)
   const EXCLUIDAS = [
     "/auth/google",
     "/auth/google-token",
     "/auth/google/complete-register",
     "/auth/refresh",
-    "/auth/logout", 
-    "/public/citas"   
+    "/auth/logout",
+    "/public/citas",
+    "/admin/request-code",
+    "/admin/login",
   ];
 
   const esPublica = req.path.startsWith("/public/");
@@ -54,15 +56,10 @@ function validarCsrf(req, res, next) {
     return next();
   }
 
-  if (EXCLUIDAS.some(ruta => req.path === ruta || req.originalUrl.endsWith(ruta))) {
-    return next();
-  }
-
 
   const tokenHeader = req.headers["x-csrf-token"];
-  const tokenCookie = req.cookies?.csrf_token;
 
-  if (!tokenHeader || !tokenCookie || tokenHeader !== tokenCookie) {
+  if (!tokenHeader) {
     return res.status(403).json({ error: "Token CSRF inválido o ausente" });
   }
 
