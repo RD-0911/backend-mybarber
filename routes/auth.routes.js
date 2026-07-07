@@ -47,7 +47,7 @@ const forgotLimiter = rateLimit({
 });
 
 // ── Helpers de tokens ─────────────────────────────────────────────
-
+//gol5
 function generarToken(payload, expira = "1h") {
   return jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: expira });
 }
@@ -60,10 +60,33 @@ function generarTokenRegistro(googleData) {
   );
 }
 
-async function generarRefreshToken(userId, userType) {
-  const token = crypto.randomBytes(32).toString("hex");
-  await guardarRefreshToken(token, userId, userType);
+// async function generarRefreshToken(userId, userType) {
+//   const token = crypto.randomBytes(32).toString("hex");
+//   await guardarRefreshToken(token, userId, userType);
+//   return token;
+// }
+
+const generarRefreshToken = async (userId, userType, userAgent = null) => {
+  const token = crypto.randomBytes(64).toString("hex");
+  await guardarRefreshToken(token, userId, userType, userAgent);
   return token;
+};
+//gol6
+// Enviar refresh token como cookie HttpOnly
+function setRefreshCookie(res, token, tipo){
+  res.cookie(`refreshToken_${tipo}`, token,{
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "strict",
+    maxAge: 30*24*60*60*1000, //Equivalente a 30 días (1000 ms * 60 segundos * 60 mins * 24 hrs * 30 días)
+  })
+  //Cookie que actúa como flag para saber si hay una sesión activa o no
+  res.cookie(`hasSession_${tipo}`, "1", {
+    httpOnly: false,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "strict",
+    maxAge: 30*24*60*60*1000,
+  })
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -76,14 +99,14 @@ router.post("/register", async (req, res) => {
 
   const { nombre, direccion, nombre_encargado, telefono, correo, password } = req.body;
   const correoNorm = correo.trim().toLowerCase();
-
+//gol4
   try {
     const [existe] = await db.query(
       "SELECT id FROM barberia WHERE correo = ?", [correoNorm]
     );
     if (existe.length > 0)
       return res.status(409).json({ error: "El correo ya está registrado" });
-
+//gol2
     const passwordHash = await bcrypt.hash(password, 14);
     const [result] = await db.query(
       `INSERT INTO barberia (nombre, direccion, nombre_encargado, telefono, correo, password, auth_provider)
@@ -128,19 +151,19 @@ router.post("/login", loginLimiter, async (req, res) => {
           error: "Esta cuenta usa Google. Inicia sesión con Google o añade una contraseña desde tu perfil."
         });
       }
-
+      //gol3
       const valida = await bcrypt.compare(password, barberia.password);
       if (!valida)
         return res.status(401).json({ error: "Correo o contraseña incorrectos" });
 
       const token        = generarToken({ id: barberia.id, correo: barberia.correo, tipo: "barberia" });
-      const refreshToken = await generarRefreshToken(barberia.id, "barberia");
+      const refreshToken = await generarRefreshToken(barberia.id, "barberia", req.get("user-agent"));
       const { password: _, auth_provider: __, ...barberiaSegura } = barberia;
+      setRefreshCookie(res, refreshToken, "barberia"); //Guardar el refresh token en una cookie
       return res.json({
         message: "Login exitoso",
         tipo: "barberia",
         token,
-        refreshToken,
         barberia: barberiaSegura
       });
     }
@@ -167,13 +190,13 @@ router.post("/login", loginLimiter, async (req, res) => {
         correo:      barbero.correo,
         tipo:        "barbero"
       });
-      const refreshToken = await generarRefreshToken(barbero.id, "barbero");
+      const refreshToken = await generarRefreshToken(barbero.id, "barbero", req.get("user-agent"));
       const { password: _, ...barberoSeguro } = barbero;
+      setRefreshCookie(res, refreshToken, "barbero");
       return res.json({
         message: "Login exitoso",
         tipo: "barbero",
         token,
-        refreshToken,
         barbero: barberoSeguro
       });
     }
@@ -186,6 +209,7 @@ router.post("/login", loginLimiter, async (req, res) => {
   }
 });
 
+//gol1
 // ═══════════════════════════════════════════════════════════════
 // POST /auth/google — login / registro con Google (credential)
 // ═══════════════════════════════════════════════════════════════
@@ -220,13 +244,13 @@ router.post("/google", googleLimiter, async (req, res) => {
         await db.query("UPDATE barberia SET google_id = ? WHERE id = ?", [googleId, barberia.id]);
 
       const token        = generarToken({ id: barberia.id, correo: barberia.correo, tipo: "barberia" });
-      const refreshToken = await generarRefreshToken(barberia.id, "barberia");
+      const refreshToken = await generarRefreshToken(barberia.id, "barberia", req.get("user-agent") );
       const { password, google_id, ...barberiaSegura } = barberia;
+      setRefreshCookie(res, refreshToken, "barberia")
       return res.json({
         message: "Login exitoso con Google",
         tipo: "barberia",
         token,
-        refreshToken,
         barberia: barberiaSegura,
         tieneContrasena: !!password,
       });
@@ -251,13 +275,13 @@ router.post("/google", googleLimiter, async (req, res) => {
         correo:      barbero.correo,
         tipo:        "barbero",
       });
-      const refreshToken = await generarRefreshToken(barbero.id, "barbero");
+      const refreshToken = await generarRefreshToken(barbero.id, "barbero", req.get("user-agent"));
       const { google_id, ...barberoSeguro } = barbero;
+      setRefreshCookie(res, refreshToken, "barbero")
       return res.json({
         message: "Login exitoso con Google",
         tipo: "barbero",
         token,
-        refreshToken,
         barbero: barberoSeguro,
       });
     }
@@ -304,13 +328,13 @@ router.post("/google-token", googleLimiter, async (req, res) => {
       if (!barberia.google_id)
         await db.query("UPDATE barberia SET google_id = ? WHERE id = ?", [googleId, barberia.id]);
       const token        = generarToken({ id: barberia.id, correo: barberia.correo, tipo: "barberia" });
-      const refreshToken = await generarRefreshToken(barberia.id, "barberia");
+      const refreshToken = await generarRefreshToken(barberia.id, "barberia", req.get("user-agent"));
       const { password, google_id, ...barberiaSegura } = barberia;
+      setRefreshCookie(res, refreshToken, "barberia");
       return res.json({
         message: "Login exitoso con Google",
         tipo: "barberia",
         token,
-        refreshToken,
         barberia: barberiaSegura,
         tieneContrasena: !!password,
       });
@@ -332,13 +356,13 @@ router.post("/google-token", googleLimiter, async (req, res) => {
         id: barbero.id, id_barberia: barbero.id_barberia,
         correo: barbero.correo, tipo: "barbero",
       });
-      const refreshToken = await generarRefreshToken(barbero.id, "barbero");
+      const refreshToken = await generarRefreshToken(barbero.id, "barbero", req.get("user-agent"));
       const { google_id, ...barberoSeguro } = barbero;
+      setRefreshCookie(res, refreshToken, "barbero");
       return res.json({
         message: "Login exitoso con Google",
         tipo: "barbero",
         token,
-        refreshToken,
         barbero: barberoSeguro,
       });
     }
@@ -397,18 +421,18 @@ router.post("/google/complete-register", async (req, res) => {
     );
 
     const token        = generarToken({ id: result.insertId, correo: googleData.correo, tipo: "barberia" });
-    const refreshToken = await generarRefreshToken(result.insertId, "barberia");
+    const refreshToken = await generarRefreshToken(result.insertId, "barberia", req.get("user-agent"));
 
     const [nuevaBarberia] = await db.query(
       "SELECT id, nombre, direccion, nombre_encargado, telefono, correo, idSuscripcion, foto_perfil FROM barberia WHERE id = ?",
       [result.insertId]
     );
 
+    setRefreshCookie(res, refreshToken, "barberia");
     res.status(201).json({
       message: "Cuenta creada exitosamente",
       tipo: "barberia",
       token,
-      refreshToken,
       barberia: nuevaBarberia[0],
       tieneContrasena: false,
     });
@@ -547,14 +571,30 @@ router.post("/reset-password", async (req, res) => {
 // POST /auth/refresh — emitir nuevo access token con refresh token
 // ═══════════════════════════════════════════════════════════════
 router.post("/refresh", async (req, res) => {
-  const { refreshToken } = req.body;
+  // const { refreshToken } = req.body;
+  const tipo = req.body?.tipo || "barberia";
+  const refreshToken = req.cookies[`refreshToken_${tipo}`];
   if (!refreshToken)
-    return res.status(400).json({ error: "Refresh token requerido" });
+    return res.status(401).json({ error: "No hay sesión activa" });
 
   try {
     const registro = await obtenerRefreshToken(refreshToken);
     if (!registro)
       return res.status(401).json({ error: "Sesión expirada. Inicia sesión de nuevo." });
+
+    // ── Detección de robo de sesión por User-Agent ────────────────
+    const requestUserAgent = req.get("user-agent") || "";
+    const sessionUserAgent = registro.user_agent || "";
+
+    if (sessionUserAgent && requestUserAgent !== sessionUserAgent) {
+      await revocarRefreshToken(refreshToken);
+      console.warn(`[SEGURIDAD] Posible robo de sesión detectado. user_id=${registro.user_id} tipo=${registro.user_type}`);
+      return res.status(401).json({
+        error: "Sesión invalidada por cambio de dispositivo. Inicia sesión de nuevo.",
+        codigo: "SESSION_HIJACK"
+      });
+    }
+
 
     let userData, tokenPayload;
 
@@ -605,10 +645,18 @@ router.post("/refresh", async (req, res) => {
 // POST /auth/logout — revocar refresh token
 // ═══════════════════════════════════════════════════════════════
 router.post("/logout", async (req, res) => {
-  const { refreshToken } = req.body;
+  const tipo = req.body?.tipo || "barberia";
+  const refreshToken = req.cookies[`refreshToken_${tipo}`];
+  // const { refreshToken } = req.body;
   if (refreshToken) {
     try { await revocarRefreshToken(refreshToken); } catch (_) {}
   }
+  res.clearCookie(`refreshToken_${tipo}`,{
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "strict",
+  });
+
   res.json({ message: "Sesión cerrada correctamente" });
 });
 

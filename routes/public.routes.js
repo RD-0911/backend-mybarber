@@ -5,7 +5,7 @@ const { rateLimit, ipKeyGenerator } = require("express-rate-limit");
 
 const { validarDatosCitaPublica, sanitizar, sanitizarFacebook } = require("../validators/citas.validator");
 const { verificarToken, verificarTokenOpcional } = require("../middlewares/auth.middleware");
-
+const {sign, verify, citaPayload} = require("../services/signature.service");
 // ── Rate limiter para agendar citas públicas ──────────────────────
 // Máx 3 citas por IP cada 24 horas — evita spam de citas falsas
 const citasLimiter = rateLimit({
@@ -368,6 +368,23 @@ router.post("/citas", citasLimiter, verificarTokenOpcional, async (req, res) => 
       [cita.insertId, id_servicio, precio, precio]
     );
 
+    // ── Firma digital de la cita ──────────────────────────────────
+    // Se firma el payload canónico para poder verificar luego que
+    // los datos no fueron alterados directamente en la BD.
+    let firma = null;
+    try {
+      const payload = citaPayload({
+        id_barberia, id_cliente, id_barbero,
+        fecha: inicio, hora: inicio,
+        servicios: String(id_servicio),
+      });
+      firma = sign(payload);
+      await db.query("UPDATE citas SET firma_digital = ? WHERE id = ?", [firma, cita.insertId]);
+    } catch (signErr) {
+      // La firma es adicional — no bloquea la creación de la cita
+      console.warn("[firma] No se pudo firmar la cita:", signErr.message);
+    }
+
     res.status(201).json({ message: "¡Cita creada exitosamente!", id_cita: cita.insertId });
 
   } catch (e) {
@@ -395,5 +412,46 @@ router.put("/citas/:id/estado", verificarToken, async (req, res) => {
     res.json({ message: "Estado actualizado", estado });
   } catch (_) { res.status(500).json({ error: "Error del servidor" }); }
 });
+
+// ─────────────────────────────────────────────────────────────────
+// GET /public/citas/:id/verificar-firma
+// Verifica que los datos de una cita no hayan sido alterados en BD.
+// ─────────────────────────────────────────────────────────────────
+router.get("/citas/:id/verificar-firma", verificarToken, async (req, res) => {
+  try {
+    const [rows] = await db.query(
+      "SELECT id, id_barberia, id_cliente, id_barbero, fechaInicio, firma_digital FROM citas WHERE id = ?",
+      [req.params.id]
+    );
+    if (!rows.length) return res.status(404).json({ error: "Cita no encontrada" });
+
+    const cita = rows[0];
+    if (String(cita.id_barberia) !== String(req.barberia.id))
+      return res.status(403).json({ error: "No tienes permiso para verificar esta cita" });
+
+    if (!cita.firma_digital)
+      return res.json({ valida: false, razon: "La cita no tiene firma digital (fue creada antes de implementar firmas)" });
+
+    const payload = citaPayload({
+      id_barberia: cita.id_barberia,
+      id_cliente:  cita.id_cliente,
+      id_barbero:  cita.id_barbero,
+      fecha:       cita.fechaInicio,
+      hora:        cita.fechaInicio,
+      servicios:   String(cita.id_servicio || ""),
+    });
+
+    const valida = verify(payload, cita.firma_digital);
+    res.json({
+      valida,
+      razon: valida ? "Firma verificada correctamente" : "La firma no coincide — los datos pudieron ser alterados",
+    });
+  } catch (e) {
+    console.error("Error GET /public/citas/:id/verificar-firma:", e);
+    res.status(500).json({ error: "Error al verificar firma" });
+  }
+});
+
+
 
 module.exports = router;

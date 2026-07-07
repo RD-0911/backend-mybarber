@@ -79,18 +79,24 @@ async function initTablaRefresh() {
         INDEX idx_user (user_id, user_type)
       )
     `);
+     // Se agregó una columna nueva. Si no existe, agregarla
+    await db.query(`
+      ALTER TABLE refresh_tokens
+      ADD COLUMN IF NOT EXISTS user_agent VARCHAR(512) DEFAULT NULL
+    `).catch(() => {});
   } catch (e) {
     console.error("Error creando tabla refresh_tokens:", e.message);
   }
 }
 initTablaRefresh();
 
-const guardarRefreshToken = async (token, userId, userType) => {
+//Se recibe el userAgent como parametro en caso de secuestro de sesión
+const guardarRefreshToken = async (token, userId, userType, userAgent = null) => {
   const hash   = hashToken(token);
   const expira = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 días
   await db.query(
-    "INSERT INTO refresh_tokens (token_hash, user_id, user_type, expira) VALUES (?, ?, ?, ?)",
-    [hash, userId, userType, expira]
+    "INSERT INTO refresh_tokens (token_hash, user_id, user_type, user_agent, expira) VALUES (?, ?, ?, ?, ?)",
+    [hash, userId, userType, userAgent, expira]
   );
 };
 
@@ -113,7 +119,7 @@ const limpiarRefreshExpirados = async () => {
     await db.query("DELETE FROM refresh_tokens WHERE expira < NOW()");
   } catch (_) {}
 };
-setInterval(limpiarRefreshExpirados, 60 * 60 * 1000);
+setInterval(limpiarRefreshExpirados, 60 * 60 * 1000); //1 hora
 
 module.exports = {
   guardarCodigo,
