@@ -110,7 +110,7 @@ router.get("/citas-barberia/:id_barberia", verificarToken, async (req, res) => {
       `SELECT
         c.id, c.fechaInicio, c.fechaFin, c.estado, c.precio,
         c.id_barbero,
-        CONCAT(cl.nombre, ' ', cl.primerAp) AS cliente_nombre,
+        TRIM(CONCAT(IFNULL(cl.nombre, ''), ' ', IFNULL(cl.primerAp, ''))) AS cliente_nombre,
         cl.telefono,
         s.descripcion  AS servicio_desc,
         IFNULL(s.tipo,'servicio') AS servicio_tipo,

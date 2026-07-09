@@ -24,7 +24,7 @@ router.get("/citas", verificarBarbero, async (req, res) => {
     const [rows] = await db.query(
       `SELECT
         c.id, c.fechaInicio, c.fechaFin, c.estado, c.precio,
-        CONCAT(cl.nombre, ' ', cl.primerAp) AS cliente_nombre,
+        TRIM(CONCAT(IFNULL(cl.nombre, ''), ' ', IFNULL(cl.primerAp, ''))) AS cliente_nombre,
         cl.telefono,
         s.descripcion  AS servicio_desc,
         IFNULL(s.tipo, 'servicio') AS servicio_tipo,
@@ -192,7 +192,7 @@ router.get("/clientes/buscar", verificarBarbero, async (req, res) => {
        FROM clientes c
        INNER JOIN cliente_barberia cb ON cb.id_cliente = c.id
        WHERE cb.id_barberia = ?
-         AND (CONCAT(c.nombre, ' ', c.primerAp) LIKE ? OR c.telefono LIKE ?)
+         AND (c.nombre LIKE ? OR c.telefono LIKE ?)
        ORDER BY c.nombre ASC LIMIT 10`,
       [req.barbero.id_barberia, b, b]
     );

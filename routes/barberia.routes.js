@@ -270,14 +270,14 @@ router.get("/:id/clientes/buscar", verificarToken, async (req, res) => {
       const [rows] = await db.query(
         `SELECT c.id, c.nombre, c.primerAp, c.telefono FROM clientes c
          INNER JOIN cliente_barberia cb ON cb.id_cliente = c.id
-         WHERE cb.id_barberia=? AND (CONCAT(c.nombre,' ',c.primerAp) LIKE ? OR c.telefono LIKE ?)
+         WHERE cb.id_barberia=? AND (c.nombre LIKE ? OR c.telefono LIKE ?)
          ORDER BY c.nombre ASC LIMIT 10`,
         [req.params.id, b, b]
       );
       return res.json(rows);
     } catch (_) {
       const [rows] = await db.query(
-        "SELECT id, nombre, primerAp, telefono FROM clientes WHERE CONCAT(nombre,' ',primerAp) LIKE ? OR telefono LIKE ? LIMIT 10",
+        "SELECT id, nombre, primerAp, telefono FROM clientes WHERE nombre LIKE ? OR telefono LIKE ? LIMIT 10",
         [b, b]
       );
       return res.json(rows);
