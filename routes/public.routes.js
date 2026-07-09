@@ -209,7 +209,7 @@ router.get("/disponibilidad/:id_barberia", async (req, res) => {
 router.post("/citas", citasLimiter, verificarTokenOpcional, async (req, res) => {
   const {
     id_barberia, id_servicio, fechaInicio,
-    nombre, primerAp, telefono, usuarioFacebook,
+    nombre, telefono,
     id_cliente: id_cliente_param,
     id_barbero: id_barbero_param,
   } = req.body;
@@ -242,9 +242,8 @@ router.post("/citas", citasLimiter, verificarTokenOpcional, async (req, res) => 
         id_cliente = existe[0].id;
       } else {
         const [nuevo] = await db.query(
-          "INSERT INTO clientes (nombre, primerAp, telefono, usuarioFacebook) VALUES (?,?,?,?)",
-          [sanitizar(nombre), primerAp ? sanitizar(primerAp) : null, telefono.trim(),
-           usuarioFacebook ? sanitizarFacebook(usuarioFacebook) : null]
+          "INSERT INTO clientes (nombre, telefono) VALUES (?,?)",
+          [sanitizar(nombre), telefono.trim()]
         );
         id_cliente = nuevo.insertId;
       }
