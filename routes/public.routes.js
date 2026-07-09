@@ -243,7 +243,7 @@ router.post("/citas", citasLimiter, verificarTokenOpcional, async (req, res) => 
       } else {
         const [nuevo] = await db.query(
           "INSERT INTO clientes (nombre, primerAp, telefono, usuarioFacebook) VALUES (?,?,?,?)",
-          [sanitizar(nombre), sanitizar(primerAp), telefono.trim(),
+          [sanitizar(nombre), primerAp ? sanitizar(primerAp) : null, telefono.trim(),
            usuarioFacebook ? sanitizarFacebook(usuarioFacebook) : null]
         );
         id_cliente = nuevo.insertId;

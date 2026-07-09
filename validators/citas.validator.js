@@ -34,27 +34,11 @@ const validarDatosCitaPublica = (datos) => {
   else if (!validarTexto(datos.nombre))
     errores.push("El nombre solo debe contener letras, sin números ni símbolos");
 
-  // Apellido
-  if (!datos.primerAp || datos.primerAp.trim() === "")
-    errores.push("El apellido es obligatorio");
-  else if (datos.primerAp.trim().length < 2)
-    errores.push("El apellido debe tener al menos 2 letras");
-  else if (!validarTexto(datos.primerAp))
-    errores.push("El apellido solo debe contener letras, sin números ni símbolos");
-
   // Teléfono
   if (!datos.telefono || datos.telefono.trim() === "")
     errores.push("El teléfono es obligatorio");
   else if (!validarTelefono(datos.telefono))
     errores.push("El teléfono debe contener exactamente 10 dígitos numéricos");
-
-  // Facebook
-  if (!datos.usuarioFacebook || datos.usuarioFacebook.trim() === "")
-    errores.push("El usuario de Facebook es obligatorio");
-  else if (datos.usuarioFacebook.trim().length < 3)
-    errores.push("El usuario de Facebook debe tener al menos 3 caracteres");
-  else if (/<|>|script|javascript|onerror|onload/i.test(datos.usuarioFacebook))
-    errores.push("El usuario de Facebook contiene caracteres no permitidos");
 
   return errores;
 };
