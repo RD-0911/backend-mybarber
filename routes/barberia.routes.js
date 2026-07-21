@@ -332,7 +332,7 @@ router.get("/:id/configuracion/confirmaciones", verificarToken, async (req, res)
       "SELECT confirmaciones_automaticas FROM configuracion_barberia WHERE id_barberia=?",
       [req.params.id]
     );
-    const confirmacionesActivas = rows.length > 0 ? rows[0].confirmaciones_automaticas : true;
+    const confirmacionesActivas = rows.length > 0 ? rows[0].confirmaciones_automaticas : false;
     res.json({ confirmaciones_automaticas: confirmacionesActivas });
   } catch (e) {
     res.status(500).json({ error: "Error al obtener configuración" });

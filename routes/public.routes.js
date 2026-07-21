@@ -361,7 +361,7 @@ router.post("/citas", citasLimiter, verificarTokenOpcional, async (req, res) => 
       "SELECT confirmaciones_automaticas FROM configuracion_barberia WHERE id_barberia=?",
       [id_barberia]
     );
-    const confirmacionesActivas = configRows.length > 0 ? configRows[0].confirmaciones_automaticas : true;
+    const confirmacionesActivas = configRows.length > 0 ? configRows[0].confirmaciones_automaticas : false;
     const estadoInicial = confirmacionesActivas ? 'pendiente' : 'confirmada';
 
     // ── Crear la cita ────────────────────────────────────────────
