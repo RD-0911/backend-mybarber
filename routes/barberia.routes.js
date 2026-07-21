@@ -324,4 +324,50 @@ router.put("/:id/password", verificarToken, async (req, res) => {
   }
 });
 
+// GET /barberia/:id/configuracion/confirmaciones — obtener estado
+router.get("/:id/configuracion/confirmaciones", verificarToken, async (req, res) => {
+  if (!esOwner(req, res)) return;
+  try {
+    const [rows] = await db.query(
+      "SELECT confirmaciones_automaticas FROM configuracion_barberia WHERE id_barberia=?",
+      [req.params.id]
+    );
+    const confirmacionesActivas = rows.length > 0 ? rows[0].confirmaciones_automaticas : true;
+    res.json({ confirmaciones_automaticas: confirmacionesActivas });
+  } catch (e) {
+    res.status(500).json({ error: "Error al obtener configuración" });
+  }
+});
+
+// POST /barberia/:id/configuracion/confirmaciones — cambiar estado
+router.post("/:id/configuracion/confirmaciones", verificarToken, async (req, res) => {
+  if (!esOwner(req, res)) return;
+  const { confirmaciones_automaticas } = req.body;
+  if (confirmaciones_automaticas === undefined)
+    return res.status(400).json({ error: "Campo confirmaciones_automaticas requerido" });
+
+  try {
+    // 1. Insertar o actualizar configuración
+    await db.query(
+      `INSERT INTO configuracion_barberia (id_barberia, confirmaciones_automaticas)
+       VALUES (?, ?)
+       ON DUPLICATE KEY UPDATE confirmaciones_automaticas=?`,
+      [req.params.id, confirmaciones_automaticas, confirmaciones_automaticas]
+    );
+
+    // 2. Si se desactiva, convertir pendientes a confirmadas
+    if (!confirmaciones_automaticas) {
+      await db.query(
+        "UPDATE citas SET estado='confirmada' WHERE id_barberia=? AND estado='pendiente'",
+        [req.params.id]
+      );
+    }
+
+    res.json({ message: "Configuración actualizada", confirmaciones_automaticas });
+  } catch (e) {
+    console.error("Error actualizando configuración:", e);
+    res.status(500).json({ error: "Error al actualizar configuración" });
+  }
+});
+
 module.exports = router;

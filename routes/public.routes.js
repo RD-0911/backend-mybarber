@@ -356,10 +356,18 @@ router.post("/citas", citasLimiter, verificarTokenOpcional, async (req, res) => 
         return res.status(409).json({ error: "Este horario ya está ocupado. Por favor elige otro." });
     }
 
+    // ── Obtener configuración de confirmaciones ─────────────────
+    const [configRows] = await db.query(
+      "SELECT confirmaciones_automaticas FROM configuracion_barberia WHERE id_barberia=?",
+      [id_barberia]
+    );
+    const confirmacionesActivas = configRows.length > 0 ? configRows[0].confirmaciones_automaticas : true;
+    const estadoInicial = confirmacionesActivas ? 'pendiente' : 'confirmada';
+
     // ── Crear la cita ────────────────────────────────────────────
     const [cita] = await db.query(
-      "INSERT INTO citas (fechaInicio, fechaFin, id_barberia, id_cliente, id_barbero, estado, precio) VALUES (?,?,?,?,?,'pendiente',?)",
-      [inicio, fin, id_barberia, id_cliente, id_barbero, precio]
+      "INSERT INTO citas (fechaInicio, fechaFin, id_barberia, id_cliente, id_barbero, estado, precio) VALUES (?,?,?,?,?,?,?)",
+      [inicio, fin, id_barberia, id_cliente, id_barbero, estadoInicial, precio]
     );
 
     await db.query(
